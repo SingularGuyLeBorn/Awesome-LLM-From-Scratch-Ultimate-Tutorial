@@ -1,0 +1,83 @@
+# FILE: .gitignore
+# ================================================================= #
+# General Python                                                    #
+# ================================================================= #
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class$
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ================================================================= #
+# Project Specific Files                                            #
+# ================================================================= #
+
+# --- Data Pipeline: IGNORE ALL DATA! ---
+# Ignore all downloaded and processed data. These are large and can be regenerated.
+data_pipeline/downloaded_data/
+data_pipeline/processed_data/
+
+# You can be more specific if you want to track some small metadata files in the future
+# For now, ignoring the whole directories is the safest.
+# data_pipeline/processed_data/*.bin
+# data_pipeline/processed_data/*.txt
+# data_pipeline/processed_data/*.json
+# data_pipeline/processed_data/TinyStories_encoded/
+
+# --- Training Outputs: IGNORE ALL ARTIFACTS! ---
+# Ignore all checkpoints, logs, and monitoring tool outputs.
+checkpoints/
+swanlog/
+wandb/
+
+# --- IDE / Editor specific ---
+# PyCharm
+.idea/
+
+# VSCode
+.vscode/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# --- OS specific ---
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+
+# --- Other ---
+# Ignore temporary test files or scratch files
+all_code.txt
+getallcode.py
+
+# END OF FILE: .gitignore

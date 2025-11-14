@@ -1,0 +1,73 @@
+# FILE: configs/pretrain_config.yaml
+# 【v3 - 清晰版】预训练统一配置文件
+# 恢复了所有注释，并移除了已失效的配置项。
+
+# --- 运行元数据 ---
+# run_name: 每次运行的唯一名称。{timestamp} 会被自动替换为 "年-月-日-时-分-秒" 格式的时间戳。
+run_name: "pretrain_run_{timestamp}"
+# output_dir: 所有训练产物（日志、检查点）的根目录。
+output_dir: "checkpoints"
+
+# --- 数据加载器配置 ---
+data:
+  # data_dir: 指向包含 train.bin 和 val.bin 的目录。
+  data_dir: "data_pipeline/processed_data"
+  # tokenizer_name: 指定分词器。可以是本地 .json 文件路径，也可以是 HuggingFace Hub 上的名称 (例如 "gpt2")。
+  tokenizer_name: "data_pipeline/processed_data/tinystories_project_vs4096.json"
+  # debug_subset_mb: 此参数已废弃。
+  # 数据的预处理（包括编码和生成 .bin 文件）已前置到 data_pipeline/processing/ 目录下的脚本中。
+  # 训练脚本现在总是使用完整的 .bin 文件，并通过高效的Packed-Sequences方式加载，无需再创建子集。
+
+# --- 模型配置 (与 models.config.py 对应) ---
+model:
+  dim: 128
+  n_layers: 4
+  n_heads: 4
+  n_kv_heads: 2
+  vocab_size: 4096 # 必须与 tokenizer_name 对应的分词器词表大小匹配
+  multiple_of: 32
+  norm_eps: 1.0e-5
+  rope_base: 10000
+  dropout: 0.1
+  max_seq_len: 256
+
+# --- 训练超参数 ---
+training:
+  max_epochs: 1
+  batch_size: 8
+  learning_rate: 1.0e-3
+  weight_decay: 0.1
+  # 梯度累积：等效批次大小 = batch_size * gradient_accumulation_steps
+  gradient_accumulation_steps: 2
+  clip_grad_norm: 1.0
+
+  # 学习率调度器
+  warmup_ratio: 0.1 # 预热阶段占总迭代次数的比例
+  min_lr_ratio: 0.1 # 最小学习率 = learning_rate * min_lr_ratio
+
+# --- 日志与检查点 ---
+logging:
+  # Weights & Biases 配置
+  wandb:
+    enable: false # 设为 true 以启用
+    project: "llm-from-scratch-tutorial"
+
+  # SwanLab 配置
+  swanlab:
+    enable: true # 设为 true 以启用
+    project: "LLM-From-Scratch-Monitoring"
+    experiment_name: "{run_name}"
+
+  # log_interval: 每隔多少个 global_step (权重更新步) 记录一次日志
+  log_interval: 1
+
+checkpointing:
+  # save_interval: 每隔多少个 global_step 保存一次最新的检查点
+  save_interval: 100
+  # resume_from: 从哪个检查点恢复训练。可以是 "latest", "best", 或 "none"。
+  resume_from: "none"
+
+# --- 设备配置 ---
+device: "cpu" # "cuda" if torch.cuda.is_available() else "cpu"
+
+# END OF FILE: configs/pretrain_config.yaml
