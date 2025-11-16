@@ -1,6 +1,7 @@
 # FILE: align/rm_train.py
 """
-[新增] 奖励模型 (Reward Model, RM) 训练主脚本。
+[v1.1 - 目录重构版] 奖励模型 (Reward Model, RM) 训练主脚本。
+- 输出目录将自动保存到 runs/rlhf/rm/ 下。
 """
 import torch
 import torch.nn.functional as F
@@ -21,12 +22,6 @@ from tqdm import tqdm
 
 
 def rm_loss(chosen_rewards: torch.Tensor, rejected_rewards: torch.Tensor) -> torch.Tensor:
-    """
-    计算奖励模型的损失。
-    目标是最大化 chosen_rewards 和 rejected_rewards 之间的差值。
-    损失函数 = -log(sigmoid(chosen_rewards - rejected_rewards))
-    """
-    # 形状都是 (batch_size,)
     return -F.logsigmoid(chosen_rewards - rejected_rewards).mean()
 
 
@@ -37,8 +32,14 @@ def main():
 
     # --- 0. 配置与日志 ---
     cfg = load_config(args.config_path, Path(__file__).parent.parent.resolve())
-    output_dir = Path(cfg.output_dir) / f"{cfg.run_name}-{time.strftime('%Y%m%d-%H%M%S')}"
+
+    # [核心修改] 自动创建层级化输出目录
+    timestamp = time.strftime('%Y%m%d-%H%M%S')
+    run_name = cfg.run_name.format(timestamp=timestamp)
+    base_output_dir = Path(cfg.output_dir)
+    output_dir = base_output_dir / "rlhf" / "rm" / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
+
     logger = build_loggers(cfg, output_dir, "rm_run")
 
     # --- 1. 初始化模型 ---
@@ -47,7 +48,6 @@ def main():
     if cfg.rm.load_from_checkpoint:
         print(f"正在从SFT检查点加载权重: {cfg.rm.load_from_checkpoint}")
         checkpoint = torch.load(cfg.rm.load_from_checkpoint, map_location=cfg.device)
-        # 只加载 transformer 部分的权重，不加载最后的输出头
         reward_model.transformer.load_state_dict(checkpoint['model_state_dict'])
         print("✅ RM Transformer 权重加载成功。")
 
@@ -81,7 +81,6 @@ def main():
             optimizer.step()
             scheduler.step()
 
-            # 计算准确率: chosen_rewards > rejected_rewards 的比例
             accuracy = (chosen_rewards > rejected_rewards).float().mean().item()
 
             pbar.set_postfix(loss=f"{loss.item():.4f}", acc=f"{accuracy:.2f}", lr=f"{scheduler.get_last_lr()[0]:.2e}")
@@ -95,7 +94,6 @@ def main():
     logger.finish()
     print("\n--- 奖励模型训练完成 ---")
 
-    # 保存最终模型
     final_ckpt_path = output_dir / "rm_final.pth"
     torch.save({'model_state_dict': reward_model.state_dict()}, final_ckpt_path)
     print(f"✅ 最终奖励模型已保存到: {final_ckpt_path}")

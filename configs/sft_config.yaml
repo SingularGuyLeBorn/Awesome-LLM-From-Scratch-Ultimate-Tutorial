@@ -35,7 +35,7 @@ model:
 sft:
   # !!! 关键：指定从哪个预训练检查点加载权重
   # !!! 运行前请将此路径修改为你实际的最佳预训练检查点路径
-  load_from_checkpoint: "./runs/cpu-fast-test-20251116-010329/checkpoints/ckpt_best.pth"
+  load_from_checkpoint: "./runs/pretrain/cpu-fast-test-20251116-152616/checkpoints/ckpt_best.pth"
 
 # -- 5. 训练超参数 (通常比预训练更小、更短) --
 training:

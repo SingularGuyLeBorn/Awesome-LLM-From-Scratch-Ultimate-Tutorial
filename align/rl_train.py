@@ -1,7 +1,7 @@
 # FILE: align/rl_train.py
 """
-[v1.3 - RM加载增强版] 通用强化学习 (RL) 训练主脚本。
-- 增加逻辑以加载一个独立的、预训练好的奖励模型。
+[v1.4 - 目录重构版] 通用强化学习 (RL) 训练主脚本。
+- 输出目录将根据算法名称自动保存到 runs/rlhf/{algorithm}/ 下。
 """
 import torch
 import torch.nn.functional as F
@@ -47,8 +47,14 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config_path, Path(__file__).parent.parent.resolve())
-    output_dir = Path(cfg.output_dir) / f"{cfg.run_name}-{time.strftime('%Y%m%d-%H%M%S')}"
+
+    # [核心修改] 自动创建层级化输出目录
+    timestamp = time.strftime('%Y%m%d-%H%M%S')
+    run_name = cfg.run_name.format(timestamp=timestamp)
+    base_output_dir = Path(cfg.output_dir)
+    output_dir = base_output_dir / "rlhf" / cfg.rl.algorithm.lower() / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
+
     logger = build_loggers(cfg, output_dir, "rl_run")
 
     policy = build_model(cfg.model).to(cfg.device)
@@ -58,7 +64,6 @@ def main():
 
     for param in ref_policy.parameters(): param.requires_grad = False
 
-    # --- [核心修改] 分别加载SFT和RM的权重 ---
     sft_ckpt_path = cfg.rl.load_from_checkpoint
     print(f"\n正在从SFT检查点加载 Policy 和 Value 模型权重: {sft_ckpt_path}")
     sft_checkpoint = torch.load(sft_ckpt_path, map_location=cfg.device)
@@ -74,7 +79,6 @@ def main():
         reward_model.load_state_dict(rm_checkpoint['model_state_dict'])
         print("✅ Reward 模型权重加载成功。")
     else:
-        # 如果没有指定RM检查点，则回退到使用SFT权重（用于测试）
         print("⚠️ 警告: 未指定专用的奖励模型检查点，将使用SFT权重初始化奖励模型。")
         reward_model.transformer.load_state_dict(sft_checkpoint['model_state_dict'])
 

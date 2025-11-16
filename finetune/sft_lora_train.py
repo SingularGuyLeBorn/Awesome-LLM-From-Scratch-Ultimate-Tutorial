@@ -1,7 +1,7 @@
 # FILE: finetune/sft_lora_train.py
 """
-[v1.1 - 最终修复版] 使用 LoRA 进行监督微调 (SFT) 的训练主脚本
-- 修复了 Trainer 初始化时参数传递的严重错误。
+[v1.2 - 目录重构版] 使用 LoRA 进行SFT的训练主脚本
+- 输出目录将自动保存到 runs/sft/peft/lora/ 下。
 """
 import torch
 import argparse
@@ -28,17 +28,21 @@ except ImportError:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="[v1.1 修复版] [LoRA] 监督微调 (SFT) 脚本")
+    parser = argparse.ArgumentParser(description="[v1.2] [LoRA] 监督微调 (SFT) 脚本")
     parser.add_argument("--config_path", type=str, required=True, help="指向SFT LoRA配置YAML文件的路径")
     args = parser.parse_args()
 
     # --- 0. 配置与日志 ---
     project_base_path = Path(__file__).parent.parent.resolve()
     cfg = load_config(args.config_path, project_base_path)
+
+    # [核心修改] 自动创建层级化输出目录
     timestamp = time.strftime('%Y%m%d-%H%M%S')
     run_name = cfg.run_name.format(timestamp=timestamp)
-    output_dir = Path(cfg.output_dir) / run_name
+    base_output_dir = Path(cfg.output_dir)
+    output_dir = base_output_dir / "sft" / "peft" / "lora" / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
+
     logger = build_loggers(cfg, output_dir, run_name)
 
     # --- 1. 模型 ---
@@ -82,7 +86,6 @@ def main():
     ckpt_manager = CheckpointManager(sft_ckpt_dir, model, optimizer, scheduler, scaler)
 
     # --- 5. 训练器 ---
-    # [核心修复] 改为清晰、明确的参数传递
     trainer = Trainer(
         model=model,
         train_loader=train_loader,

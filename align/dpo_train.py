@@ -1,7 +1,7 @@
 # FILE: align/dpo_train.py
 """
-[重命名] DPO (Direct Preference Optimization) 训练主脚本
-现在是非在线 RL 训练的入口
+[v1.1 - 目录重构版] DPO (Direct Preference Optimization) 训练主脚本
+- 输出目录将自动保存到 runs/rlhf/dpo/ 下。
 """
 import torch
 import torch.nn.functional as F
@@ -39,10 +39,14 @@ def main():
     # --- 0. 配置与日志 ---
     project_base_path = Path(__file__).parent.parent.resolve()
     cfg = load_config(args.config_path, project_base_path)
+
+    # [核心修改] 自动创建层级化输出目录
     timestamp = time.strftime('%Y%m%d-%H%M%S')
     run_name = cfg.run_name.format(timestamp=timestamp)
-    output_dir = Path(cfg.output_dir) / run_name
+    base_output_dir = Path(cfg.output_dir)
+    output_dir = base_output_dir / "rlhf" / "dpo" / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
+
     logger = build_loggers(cfg, output_dir, run_name)
 
     # --- 1. 初始化模型 ---

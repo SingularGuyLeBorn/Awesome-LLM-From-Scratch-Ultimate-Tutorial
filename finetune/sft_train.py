@@ -1,7 +1,7 @@
 # FILE: finetune/sft_train.py
 """
-[v1.3 - 最终修复版] SFT (Supervised Fine-Tuning) 训练主脚本
-- 修复了 Trainer 初始化时参数传递的严重错误。
+[v1.4 - 目录重构版] SFT (Supervised Fine-Tuning) 训练主脚本
+- 输出目录将自动保存到 runs/sft/full/ 下。
 """
 import torch
 import argparse
@@ -27,17 +27,21 @@ except ImportError:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="[v1.3 修复版] 监督微调 (SFT) 脚本")
+    parser = argparse.ArgumentParser(description="[v1.4] 监督微调 (SFT) 脚本")
     parser.add_argument("--config_path", type=str, required=True, help="指向SFT配置YAML文件的路径")
     args = parser.parse_args()
 
     # --- 0. 配置与日志 ---
     project_base_path = Path(__file__).parent.parent.resolve()
     cfg = load_config(args.config_path, project_base_path)
+
+    # [核心修改] 自动创建层级化输出目录
     timestamp = time.strftime('%Y%m%d-%H%M%S')
     run_name = cfg.run_name.format(timestamp=timestamp)
-    output_dir = Path(cfg.output_dir) / run_name
+    base_output_dir = Path(cfg.output_dir)
+    output_dir = base_output_dir / "sft" / "full" / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
+
     logger = build_loggers(cfg, output_dir, run_name)
 
     # --- 1. 模型 ---
@@ -74,7 +78,6 @@ def main():
     ckpt_manager = CheckpointManager(sft_ckpt_dir, model, optimizer, scheduler, scaler)
 
     # --- 5. 训练器 ---
-    # [核心修复] 改为清晰、明确的参数传递
     trainer = Trainer(
         model=model,
         train_loader=train_loader,
@@ -84,10 +87,10 @@ def main():
         device=cfg.device,
         logger=logger,
         ckpt_manager=ckpt_manager,
-        hooks=None,  # SFT阶段不进行深度监控
+        hooks=None,
         gradient_accumulation_steps=cfg.training.gradient_accumulation_steps,
         log_interval=cfg.logging.log_interval,
-        save_interval=len(train_loader),  # SFT每epoch保存一次
+        save_interval=len(train_loader),
         scaler=scaler,
         clip_grad_norm=cfg.training.clip_grad_norm,
         loss_spike_threshold=getattr(cfg.training, 'loss_spike_threshold', 5.0),

@@ -1,9 +1,9 @@
 # FILE: configs/rm_config.yaml
 # ===================================================================
-# [新增] 奖励模型 (Reward Model, RM) 专用配置文件
+# [v1.1 - 目录重构版] 奖励模型 (Reward Model, RM) 专用配置文件
 # ===================================================================
 
-run_name: "rm-test"
+run_name: "rm-test-{timestamp}"
 output_dir: "./runs/"
 device: "cpu"
 
@@ -11,10 +11,7 @@ console:
   verbose: true
 
 data:
-  # 指向我们存放所有 .bin 文件的地方
   data_dir: "./data_pipeline/processed_data/"
-  # RM 训练不需要分词器，因为数据已经是 tokenized 的
-  # 但为了框架统一，暂时保留
   tokenizer_name: "./data_pipeline/processed_data/tinystories_project_vs4096.json"
 
 model:
@@ -30,18 +27,17 @@ model:
   dropout: 0.0
 
 rm:
-  # RM 的 Transformer 骨干从 SFT 模型初始化
-  load_from_checkpoint: "./runs/sft-test-20251116-011348/checkpoints/ckpt_latest.pth"
+  load_from_checkpoint: "./runs/sft/full/sft-test-20251116-152948/checkpoints/ckpt_latest.pth"
 
 training:
   batch_size: 2
-  max_epochs: 10
+  max_epochs: 4 # 减少 epoch 以加速测试
   learning_rate: 1.0e-5
   weight_decay: 0.0
-  warmup_ratio: 0.1 # 在RM训练中也使用预热
+  warmup_ratio: 0.1
   min_lr_ratio: 0.1
 
 logging:
-  log_interval: 1 # 每个step都记录
+  log_interval: 1
 
 # END OF FILE: configs/rm_config.yaml

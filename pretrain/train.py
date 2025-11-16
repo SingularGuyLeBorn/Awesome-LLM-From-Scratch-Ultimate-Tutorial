@@ -1,7 +1,7 @@
 # FILE: pretrain/train.py
 """
-【v3.3 - 日志精炼版】预训练主脚本。
-- 移除了 main 函数中的 print 标题，交由 builder 函数处理。
+【v3.4 - 目录重构版】预训练主脚本。
+- 输出目录将自动保存到 runs/pretrain/ 下。
 """
 import torch
 import argparse
@@ -28,17 +28,21 @@ except ImportError:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="[v3.3] 从零手写LLM预训练脚本")
+    parser = argparse.ArgumentParser(description="[v3.4] 从零手写LLM预训练脚本")
     parser.add_argument("--config_path", type=str, required=True, help="指向预训练配置YAML文件的路径")
     args = parser.parse_args()
 
     # --- 0. 配置与日志 ---
     project_base_path = Path(__file__).parent.parent.resolve()
     cfg = load_config(args.config_path, project_base_path)
+
+    # [核心修改] 自动创建层级化输出目录
     timestamp = time.strftime('%Y%m%d-%H%M%S')
     run_name = cfg.run_name.format(timestamp=timestamp)
-    output_dir = Path(cfg.output_dir) / run_name
+    base_output_dir = Path(cfg.output_dir)
+    output_dir = base_output_dir / "pretrain" / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
+
     logger = build_loggers(cfg, output_dir, run_name)
     print(f"配置加载自: {args.config_path}")
     print(f"所有输出将保存到: {output_dir}")
