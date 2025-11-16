@@ -1,0 +1,44 @@
+# FILE: configs/ppo_config.yaml
+# ===================================================================
+# [v1.3 - RM装备版] PPO (Proximal Policy Optimization) 专用配置
+# ===================================================================
+
+run_name: "ppo-with-real-rm-test"
+output_dir: "./runs/"
+device: "cpu"
+
+console:
+  verbose: true
+
+model:
+  dim: 128
+  n_layers: 2
+  n_heads: 4
+  n_kv_heads: 2
+  vocab_size: 4096
+  max_seq_len: 256
+  multiple_of: 32
+  norm_eps: 1.0e-5
+  rope_base: 10000
+  dropout: 0.0
+
+rl:
+  algorithm: "ppo"
+  # Policy, ref_policy, 和 value_model 的 Transformer 骨干从SFT模型初始化
+  load_from_checkpoint: "./runs/sft-test-20251116-011348/checkpoints/ckpt_latest.pth"
+
+  # [核心修改] 为 Reward Model 指定我们刚刚训练好的、独立的检查点
+  reward_model_checkpoint: "./runs/rm-test-20251116-145506/rm_final.pth"
+
+  rollout_batches: 16
+  update_epochs: 4
+  clip_epsilon: 0.2
+  gamma: 0.99
+  lambda_gae: 0.95
+
+training:
+  batch_size: 2
+  max_epochs: 4
+  learning_rate: 1.0e-5
+  weight_decay: 0.0
+# END OF FILE: configs/ppo_config.yaml

@@ -1,7 +1,6 @@
 # FILE: pretrain/components/checkpointing.py
 """
-【重构版】实现检查点管理，支持保存和加载训练状态，
-并为GPU混合精度训练的GradScaler状态提供支持。
+【v2.0 - 增加日志细节】实现检查点管理。
 """
 import torch
 import torch.nn as nn
@@ -9,7 +8,6 @@ from pathlib import Path
 import logging
 from typing import Optional
 
-# 尝试导入GradScaler，如果失败则设为None
 try:
     from torch.cuda.amp import GradScaler
 except ImportError:
@@ -34,6 +32,8 @@ class CheckpointManager:
         self.scaler = scaler
         self.best_val_loss = float('inf')
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        # [新增] 打印初始化信息
+        print(f"✅ 检查点管理器已初始化。检查点将保存到: '{self.checkpoint_dir}'")
 
     def save(self, epoch: int, val_loss: float, is_best: bool = False):
         state = {
@@ -49,12 +49,13 @@ class CheckpointManager:
 
         latest_ckpt_path = self.checkpoint_dir / "ckpt_latest.pth"
         torch.save(state, latest_ckpt_path)
+        # 使用 logging 模块，信息会进入文件和 SwanLab 控制台
         logging.info(f"Saved latest checkpoint to {latest_ckpt_path}")
 
         if is_best:
             best_ckpt_path = self.checkpoint_dir / "ckpt_best.pth"
             torch.save(state, best_ckpt_path)
-            logging.info(f"Saved best checkpoint to {best_ckpt_path} (Val Loss: {val_loss:.4f})")
+            logging.info(f"Saved best checkpoint to {best_ckpt_path} (New best Val Loss: {val_loss:.4f})")
 
     def load(self, resume_from: str = "latest") -> int:
         ckpt_path_map = {
@@ -64,7 +65,7 @@ class CheckpointManager:
         ckpt_path = ckpt_path_map.get(resume_from)
 
         if not ckpt_path or not ckpt_path.exists():
-            logging.warning(f"Checkpoint file for '{resume_from}' not found at {ckpt_path}. Starting from scratch.")
+            print(f"⚠️ 检查点 '{resume_from}' 未找到 at '{ckpt_path}'. 将从头开始训练。")
             return 0
 
         try:
@@ -80,12 +81,9 @@ class CheckpointManager:
             start_epoch = checkpoint['epoch'] + 1
             self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
 
-            logging.info(f"Successfully loaded checkpoint from {ckpt_path}. Resuming from epoch {start_epoch}.")
+            print(f"✅ 成功从 '{ckpt_path}' 加载检查点。将从 epoch {start_epoch} 继续。")
             return start_epoch
         except Exception as e:
-            logging.error(f"Failed to load checkpoint from {ckpt_path}: {e}")
-            logging.warning("Starting from scratch.")
+            print(f"❌ 加载检查点失败: {e}。将从头开始训练。")
             return 0
-
-
 # END OF FILE: pretrain/components/checkpointing.py

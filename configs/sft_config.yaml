@@ -1,0 +1,54 @@
+# FILE: configs/sft_config.yaml
+# ===================================================================
+# [新增] 监督微调 (SFT) 专用配置
+# ===================================================================
+
+# -- 1. 运行与输出配置 --
+run_name: "sft-test-{timestamp}"
+output_dir: "./runs/"
+device: "cpu"
+
+# -- 控制台输出配置 --
+console:
+  verbose: false # SFT阶段通常更关心epoch结果，而非step细节
+
+# -- 2. 数据配置 --
+data:
+  # 分词器必须与预训练阶段一致
+  tokenizer_name: "./data_pipeline/processed_data/tinystories_project_vs4096.json"
+  # 指向由 build_sft_bins.py 生成的SFT数据文件
+  sft_data_path: "./data_pipeline/processed_data/sft_data.bin"
+
+# -- 3. 模型配置 (必须与加载的检查点完全匹配) --
+model:
+  dim: 128
+  n_layers: 2
+  n_heads: 4
+  n_kv_heads: 2
+  vocab_size: 4096
+  multiple_of: 32
+  norm_eps: 1.0e-5
+  max_seq_len: 256
+  dropout: 0.0
+
+# -- 4. SFT 核心配置 --
+sft:
+  # !!! 关键：指定从哪个预训练检查点加载权重
+  # !!! 运行前请将此路径修改为你实际的最佳预训练检查点路径
+  load_from_checkpoint: "./runs/cpu-fast-test-20251116-010329/checkpoints/ckpt_best.pth"
+
+# -- 5. 训练超参数 (通常比预训练更小、更短) --
+training:
+  batch_size: 2             # SFT数据通常更长，batch size更小
+  gradient_accumulation_steps: 2
+  max_epochs: 3             # SFT通常只需要训练几个epoch
+  learning_rate: 1.0e-5     # !!! SFT的学习率通常比预训练小一个数量级
+  weight_decay: 0.0
+  clip_grad_norm: 1.0
+
+# -- 6. 日志配置 --
+logging:
+  log_interval: 10 # 日志频率可以降低
+  # (可以添加swanlab/wandb配置)
+
+# END OF FILE: configs/sft_config.yaml

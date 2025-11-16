@@ -1,0 +1,71 @@
+# FILE: configs/sft_lora_config.yaml
+# ===================================================================
+# [v1.1 - 修复版] 使用 LoRA 进行监督微调 (SFT) 的专用配置
+# ===================================================================
+
+# -- 1. 运行与输出配置 --
+run_name: "sft-lora-test-{timestamp}"
+output_dir: "./runs/"
+device: "cpu"
+
+# -- 控制台输出配置 --
+console:
+  verbose: false
+
+# -- 2. 数据配置 --
+data:
+  tokenizer_name: "./data_pipeline/processed_data/tinystories_project_vs4096.json"
+  sft_data_path: "./data_pipeline/processed_data/sft_data.bin"
+
+# -- 3. 模型配置 (必须与加载的检查点完全匹配) --
+model:
+  dim: 128
+  n_layers: 2
+  n_heads: 4
+  n_kv_heads: 2
+  vocab_size: 4096
+  multiple_of: 32
+  norm_eps: 1.0e-5
+  max_seq_len: 256
+  dropout: 0.0
+
+# -- 4. SFT 核心配置 --
+sft:
+  load_from_checkpoint: "./runs/cpu-fast-test-20251116-010329/checkpoints/ckpt_best.pth"
+
+# -- 5. LoRA 配置 --
+lora:
+  r: 8
+  alpha: 16
+  dropout: 0.05
+  target_modules:
+    - "wq"
+    - "wk"
+    - "wv"
+    - "wo"
+
+# -- 6. 训练超参数 --
+training:
+  batch_size: 2
+  gradient_accumulation_steps: 2
+  max_epochs: 5
+  learning_rate: 3.0e-4
+  weight_decay: 0.0
+  clip_grad_norm: 1.0
+  save_interval: 3
+
+  loss_spike_threshold: 5.0
+  max_consecutive_spikes: 5
+  grad_norm_history_size: 100
+  grad_clip_percentile: 0.9
+  dynamic_clip_factor: 1.5
+
+# -- [核心修复] 7. 日志配置 --
+logging:
+  log_interval: 1
+  swanlab:
+    enable: false
+  wandb:
+    enable: false
+
+# END OF FILE: configs/sft_lora_config.yaml

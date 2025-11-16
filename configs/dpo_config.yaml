@@ -1,0 +1,55 @@
+# FILE: configs/dpo_config.yaml
+# ===================================================================
+# [新增] DPO (Direct Preference Optimization) 专用配置
+# ===================================================================
+
+# -- 1. 运行与输出配置 --
+run_name: "dpo-test-{timestamp}"
+output_dir: "./runs/"
+device: "cpu"
+
+# -- 控制台输出配置 --
+console:
+  verbose: true
+
+# -- 2. 数据配置 --
+data:
+  tokenizer_name: "./data_pipeline/processed_data/tinystories_project_vs4096.json"
+  # 指向包含 preference_chosen.bin 和 preference_rejected.bin 的目录
+  data_dir: "./data_pipeline/processed_data/"
+
+# -- 3. 模型配置 (必须与加载的SFT检查点完全匹配) --
+model:
+  dim: 128
+  n_layers: 2
+  n_heads: 4
+  n_kv_heads: 2
+  vocab_size: 4096
+  multiple_of: 32
+  norm_eps: 1.0e-5
+  max_seq_len: 256
+  dropout: 0.0
+
+# -- 4. DPO 核心配置 --
+dpo:
+  # !!! 关键：指定从哪个 SFT 检查点加载权重
+  # DPO是在SFT模型的基础上进行的
+  load_from_checkpoint: "./runs/sft-test-20251116-012254/checkpoints/ckpt_latest.pth" # 请修改为你的SFT检查点
+  beta: 0.1 # DPO的温度超参数
+
+# -- 5. 训练超参数 --
+training:
+  batch_size: 1 # 偏好数据对内存占用大，batch size通常很小
+  max_epochs: 4
+  learning_rate: 5.0e-6 # DPO的学习率通常比SFT更小
+  weight_decay: 0.0
+
+# -- 6. 日志配置 --
+logging:
+  log_interval: 1
+  swanlab:
+    enable: false
+  wandb:
+    enable: false
+
+# END OF FILE: configs/dpo_config.yaml

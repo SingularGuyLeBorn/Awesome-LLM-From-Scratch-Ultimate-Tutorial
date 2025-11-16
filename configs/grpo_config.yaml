@@ -1,0 +1,41 @@
+# FILE: configs/grpo_config.yaml
+# ===================================================================
+# [v1.2 - 配置补全版] GRPO (Group Relative Policy Optimization) 专用配置
+# ===================================================================
+
+run_name: "grpo-test"
+output_dir: "./runs/"
+device: "cpu"
+
+console:
+  verbose: true
+
+# [核心修复] 补全所有 ModelArgs 所需的参数
+model:
+  dim: 128
+  n_layers: 2
+  n_heads: 4
+  n_kv_heads: 2
+  vocab_size: 4096
+  max_seq_len: 256
+  multiple_of: 32   # 缺失的参数
+  norm_eps: 1.0e-5    # 缺失的参数
+  rope_base: 10000    # 缺失的参数
+  dropout: 0.0        # 缺失的参数
+
+rl:
+  algorithm: "grpo"
+  load_from_checkpoint: "./runs/sft-test-20251116-012254/checkpoints/ckpt_latest.pth"
+  rollout_batches: 16
+  update_epochs: 4
+  clip_epsilon: 0.2
+  gamma: 0.99
+  lambda_gae: 0.95
+  group_size: 4
+
+training:
+  batch_size: 2
+  max_epochs: 4
+  learning_rate: 1.0e-5
+  weight_decay: 0.0
+# END OF FILE: configs/grpo_config.yaml
