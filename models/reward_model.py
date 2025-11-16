@@ -1,7 +1,7 @@
 # FILE: models/reward_model.py
 """
-[v1.2 - RM训练专用版] 奖励模型 (Reward Model) 的架构。
-- forward 方法现在只返回最终的标量奖励，以简化RM训练和PPO流程。
+[v1.3 - 健壮性修复版] 奖励模型 (Reward Model) 的架构。
+- forward 方法现在接收 attention_mask 以精确地定位最后一个 token。
 """
 import torch
 import torch.nn as nn
@@ -15,11 +15,14 @@ class RewardModel(nn.Module):
         self.transformer = Transformer(args)
         self.reward_head = nn.Linear(args.dim, 1, bias=False)
 
-    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+    def forward(self, tokens: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         """
         前向传播，只返回最终的序列标量奖励。
+
         Args:
             tokens (torch.Tensor): 输入的 token ID 序列, 形状 (batch_size, seq_len)
+            attention_mask (torch.Tensor): 注意力掩码, 形状 (batch_size, seq_len), 1表示真实token, 0表示padding
+
         Returns:
             end_rewards (torch.Tensor): 每个序列的最终标量奖励, 形状 (batch_size,)
         """
@@ -28,14 +31,17 @@ class RewardModel(nn.Module):
         # (batch_size, seq_len, 1)
         all_rewards = self.reward_head(hidden_states)
 
-        # 找到每个序列中最后一个非填充 token 的位置
-        # 假设 padding_id 是 0, 或者任何在序列末尾不会自然出现的token
-        # 一个更健壮的方法是接收 padding_mask
-        non_pad_mask = tokens != 0
-        last_token_indices = non_pad_mask.long().cumsum(dim=1).argmax(dim=1)
+        # [核心修复] 使用 attention_mask 来精确定位最后一个真实 token 的位置
+        # 1. 计算每个序列的真实长度
+        sequence_lengths = attention_mask.sum(dim=1, dtype=torch.long)
 
+        # 2. 最后一个 token 的索引是长度减一
+        last_token_indices = sequence_lengths - 1
+
+        # 3. 创建批次索引
         batch_indices = torch.arange(all_rewards.size(0), device=all_rewards.device)
 
+        # 4. 使用高级索引从 all_rewards 中提取每个序列的最后一个真实 token 的奖励值
         # (batch_size,)
         end_rewards = all_rewards[batch_indices, last_token_indices].squeeze(-1)
 

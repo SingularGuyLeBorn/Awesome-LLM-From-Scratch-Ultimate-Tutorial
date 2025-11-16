@@ -1,0 +1,12 @@
+# FILE: data_pipeline/prompts/dummy_prompts.txt
+Once upon a time
+In a land far, far away
+Write a short story about a brave knight and a wise dragon.
+What is the capital of France?
+Explain the theory of relativity in simple terms.
+Compose a haiku about the winter season.
+List three benefits of regular exercise.
+The quick brown fox
+Tell me a joke about computers.
+Once there was a little robot who wanted to see the world.
+# END OF FILE: data_pipeline/prompts/dummy_prompts.txt

@@ -1,7 +1,8 @@
 # FILE: align/rm_train.py
+# -*- coding: utf-8 -*-
 """
-[v1.1 - 目录重构版] 奖励模型 (Reward Model, RM) 训练主脚本。
-- 输出目录将自动保存到 runs/rlhf/rm/ 下。
+[v1.3 - 健壮性修复版] 奖励模型 (Reward Model, RM) 训练主脚本。
+- 集成 attention_mask，以实现更精确的奖励值提取。
 """
 import torch
 import torch.nn.functional as F
@@ -18,6 +19,7 @@ if project_root not in sys.path:
 from utils.config_loader import load_config
 from utils.builders import build_reward_model, build_optimizer, build_scheduler, build_loggers
 from align.preference_data_loader import get_preference_loaders
+from pretrain.components.checkpointing import CheckpointManager
 from tqdm import tqdm
 
 
@@ -33,7 +35,6 @@ def main():
     # --- 0. 配置与日志 ---
     cfg = load_config(args.config_path, Path(__file__).parent.parent.resolve())
 
-    # [核心修改] 自动创建层级化输出目录
     timestamp = time.strftime('%Y%m%d-%H%M%S')
     run_name = cfg.run_name.format(timestamp=timestamp)
     base_output_dir = Path(cfg.output_dir)
@@ -54,6 +55,7 @@ def main():
     # --- 2. 数据 ---
     train_loader = get_preference_loaders(
         data_dir=Path(cfg.data.data_dir),
+        tokenizer_name=cfg.data.tokenizer_name,
         block_size=cfg.model.max_seq_len,
         batch_size=cfg.training.batch_size
     )
@@ -63,16 +65,26 @@ def main():
     max_iters = len(train_loader) * cfg.training.max_epochs
     scheduler = build_scheduler(optimizer, cfg.training, max_iters)
 
-    # --- 4. 训练循环 ---
+    # --- 4. 检查点管理器 ---
+    print("\n--- 4. 初始化检查点管理器 ---")
+    ckpt_dir = output_dir / "checkpoints"
+    ckpt_manager = CheckpointManager(ckpt_dir, reward_model, optimizer, scheduler)
+
+    # --- 5. 训练循环 ---
     print("\n--- 开始奖励模型 (RM) 训练 ---")
     global_step = 0
+    best_accuracy = 0.0
     for epoch in range(cfg.training.max_epochs):
         pbar = tqdm(train_loader, desc=f"Epoch {epoch} [RM Training]")
-        for chosen_tokens, rejected_tokens in pbar:
+        total_accuracy = 0
+        # [核心修改] 解包 attention_mask
+        for chosen_tokens, rejected_tokens, chosen_mask, rejected_mask in pbar:
             chosen_tokens, rejected_tokens = chosen_tokens.to(cfg.device), rejected_tokens.to(cfg.device)
+            chosen_mask, rejected_mask = chosen_mask.to(cfg.device), rejected_mask.to(cfg.device)
 
-            chosen_rewards = reward_model(chosen_tokens)
-            rejected_rewards = reward_model(rejected_tokens)
+            # [核心修改] 将 attention_mask 传递给模型
+            chosen_rewards = reward_model(chosen_tokens, attention_mask=chosen_mask)
+            rejected_rewards = reward_model(rejected_tokens, attention_mask=rejected_mask)
 
             loss = rm_loss(chosen_rewards, rejected_rewards)
 
@@ -82,21 +94,27 @@ def main():
             scheduler.step()
 
             accuracy = (chosen_rewards > rejected_rewards).float().mean().item()
+            total_accuracy += accuracy
 
             pbar.set_postfix(loss=f"{loss.item():.4f}", acc=f"{accuracy:.2f}", lr=f"{scheduler.get_last_lr()[0]:.2e}")
 
             if global_step % cfg.logging.log_interval == 0:
-                logger.log({'rm/loss': loss.item(), 'rm/accuracy': accuracy, 'lr': scheduler.get_last_lr()[0]},
+                logger.log({'rm/loss': loss.item(), 'rm/accuracy_step': accuracy, 'lr': scheduler.get_last_lr()[0]},
                            step=global_step)
 
             global_step += 1
 
+        epoch_accuracy = total_accuracy / len(train_loader)
+        logger.log({'rm/accuracy_epoch': epoch_accuracy}, step=epoch)
+
+        is_best = epoch_accuracy > best_accuracy
+        if is_best:
+            best_accuracy = epoch_accuracy
+
+        ckpt_manager.save(epoch, 1 - epoch_accuracy, is_best)
+
     logger.finish()
     print("\n--- 奖励模型训练完成 ---")
-
-    final_ckpt_path = output_dir / "rm_final.pth"
-    torch.save({'model_state_dict': reward_model.state_dict()}, final_ckpt_path)
-    print(f"✅ 最终奖励模型已保存到: {final_ckpt_path}")
 
 
 if __name__ == "__main__":

@@ -1,25 +1,21 @@
-# FILE: configs/cpu_fast_test_config.yaml
+# FILE: configs/pretrain/1.4M_pretrain_fast.yaml
 # ===================================================================
-# v3.0 - 增加训练稳定性配置
+# 预训练配置 - 1.4M 尺寸模型 - 快速测试版 (语法修复)
 # ===================================================================
 
-# -- 1. 运行与输出配置 --
-run_name: "cpu-fast-test-{timestamp}"
+run_name: "pretrain-1.4M-fast-test-{timestamp}"
 output_dir: "./runs/"
 device: "cpu"
 
-# -- 控制台输出配置 --
 console:
   verbose: true
 
-# -- 2. 数据配置 --
 data:
   data_dir: "./data_pipeline/processed_data/"
   tokenizer_name: "./data_pipeline/processed_data/tinystories_project_vs4096.json"
   train_data_limit: 1000
   val_data_limit: 100
 
-# -- 3. 模型配置 --
 model:
   dim: 128
   n_layers: 2
@@ -31,7 +27,6 @@ model:
   max_seq_len: 256
   dropout: 0.0
 
-# -- 4. 训练超参数 --
 training:
   batch_size: 4
   gradient_accumulation_steps: 1
@@ -40,16 +35,13 @@ training:
   weight_decay: 0.01
   warmup_ratio: 0.1
   min_lr_ratio: 0.1
+  clip_grad_norm: 1.0
+  loss_spike_threshold: 5.0
+  max_consecutive_spikes: 5
+  grad_norm_history_size: 100
+  grad_clip_percentile: 0.9
+  dynamic_clip_factor: 1.5
 
-  # [新增] 训练稳定性相关配置
-  clip_grad_norm: 1.0               # 静态梯度裁剪的备用值
-  loss_spike_threshold: 5.0         # 损失尖峰检测阈值 (x倍于EMA)
-  max_consecutive_spikes: 5         # 最大连续尖峰次数，超过则停止
-  grad_norm_history_size: 100       # 用于动态裁剪的梯度范数历史窗口大小
-  grad_clip_percentile: 0.9         # 计算历史梯度的分位数
-  dynamic_clip_factor: 1.5          # 动态裁剪阈值 = 分位数 * 此因子
-
-# -- 5. 日志与检查点 --
 logging:
   log_interval: 1
   swanlab:
@@ -62,5 +54,4 @@ logging:
 checkpointing:
   save_interval: 5
   resume_from: "none"
-
-# END OF FILE: configs/cpu_fast_test_config.yaml
+# END OF FILE: configs/pretrain/1.4M_pretrain_fast.yaml

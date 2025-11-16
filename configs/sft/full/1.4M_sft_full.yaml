@@ -1,0 +1,41 @@
+# FILE: configs/sft/full/1.4M_sft_full.yaml
+# ===================================================================
+# SFT 全量微调配置 - 1.4M 尺寸模型 (语法修复)
+# ===================================================================
+
+run_name: "sft-full-1.4M-test-{timestamp}"
+output_dir: "./runs/"
+device: "cpu"
+
+console:
+  verbose: false
+
+data:
+  tokenizer_name: "./data_pipeline/processed_data/tinystories_project_vs4096.json"
+  sft_data_path: "./data_pipeline/processed_data/sft_data.bin"
+
+model:
+  dim: 128
+  n_layers: 2
+  n_heads: 4
+  n_kv_heads: 2
+  vocab_size: 4096
+  multiple_of: 32
+  norm_eps: 1.0e-5
+  max_seq_len: 256
+  dropout: 0.0
+
+sft:
+  load_from_checkpoint: "./runs/pretrain/pretrain-1.4M-fast-test-20251116-160719/checkpoints/ckpt_best.pth"
+
+training:
+  batch_size: 2
+  gradient_accumulation_steps: 2
+  max_epochs: 3
+  learning_rate: 1.0e-5
+  weight_decay: 0.0
+  clip_grad_norm: 1.0
+
+logging:
+  log_interval: 10
+# END OF FILE: configs/sft/full/1.4M_sft_full.yaml

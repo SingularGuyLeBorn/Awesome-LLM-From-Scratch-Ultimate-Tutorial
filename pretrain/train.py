@@ -1,7 +1,8 @@
 # FILE: pretrain/train.py
+# -*- coding: utf-8 -*-
 """
-【v3.4 - 目录重构版】预训练主脚本。
-- 输出目录将自动保存到 runs/pretrain/ 下。
+【v3.5 - 统一训练引擎版】预训练主脚本。
+- 可同时处理“从零预训练”和“继续预训练/中期训练”。
 """
 import torch
 import argparse
@@ -28,15 +29,14 @@ except ImportError:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="[v3.4] 从零手写LLM预训练脚本")
-    parser.add_argument("--config_path", type=str, required=True, help="指向预训练配置YAML文件的路径")
+    parser = argparse.ArgumentParser(description="[v3.5] 统一预训练/继续预训练脚本")
+    parser.add_argument("--config_path", type=str, required=True, help="指向配置YAML文件的路径")
     args = parser.parse_args()
 
     # --- 0. 配置与日志 ---
     project_base_path = Path(__file__).parent.parent.resolve()
     cfg = load_config(args.config_path, project_base_path)
 
-    # [核心修改] 自动创建层级化输出目录
     timestamp = time.strftime('%Y%m%d-%H%M%S')
     run_name = cfg.run_name.format(timestamp=timestamp)
     base_output_dir = Path(cfg.output_dir)
@@ -52,36 +52,41 @@ def main():
     model.to(cfg.device)
     print(f"模型已移动到设备: {cfg.device}")
 
+    # --- 2. 优化器、调度器、混合精度 ---
+    optimizer = build_optimizer(model, cfg.training)
+    train_limit = getattr(cfg.data, 'train_data_limit', None)
+    train_loader, val_loader = get_pretrain_loaders(
+        tokenizer_name=cfg.data.tokenizer_name, data_dir=Path(cfg.data.data_dir),
+        block_size=cfg.model.max_seq_len, batch_size=cfg.training.batch_size,
+        train_data_limit=train_limit, val_data_limit=getattr(cfg.data, 'val_data_limit', None)
+    )
+    max_iters = len(train_loader) * cfg.training.max_epochs
+    scheduler = build_scheduler(optimizer, cfg.training, max_iters)
+    scaler = GradScaler() if cfg.device == 'cuda' and GradScaler else None
+
+    # --- 3. 检查点管理器与加载 ---
+    print("\n--- 4. 初始化检查点管理器 ---")
+    ckpt_dir = output_dir / "checkpoints"
+    ckpt_manager = CheckpointManager(ckpt_dir, model, optimizer, scheduler, scaler)
+    start_epoch = 0
+
+    # [核心修改] 统一加载逻辑
+    load_ckpt_path = getattr(cfg.training, 'load_from_checkpoint', "none")
+    load_only_model = getattr(cfg.training, 'load_only_model', False)
+
+    if load_ckpt_path != "none":
+        print(f"检测到加载请求: {load_ckpt_path}")
+        # 使用 CheckpointManager 的 load 方法，但传入的是具体路径
+        # 注意：resume_from 参数现在是路径或 "latest"/"best"
+        start_epoch = ckpt_manager.load(load_ckpt_path, load_only_model=load_only_model)
+
+    # --- 4. 钩子与训练器 ---
     print("--- 1.1. 为模型注册监控钩子 ---")
     hooks = register_hooks(model)
     print(f"✅ 已成功注册 {len(hooks)} 个钩子用于监控内部状态。")
     eff_batch_size = cfg.training.batch_size * cfg.training.gradient_accumulation_steps
     print(f"等效批次大小: {eff_batch_size}")
 
-    # --- 2. 数据 ---
-    train_limit = getattr(cfg.data, 'train_data_limit', None)
-    val_limit = getattr(cfg.data, 'val_data_limit', None)
-    train_loader, val_loader = get_pretrain_loaders(
-        tokenizer_name=cfg.data.tokenizer_name, data_dir=Path(cfg.data.data_dir),
-        block_size=cfg.model.max_seq_len, batch_size=cfg.training.batch_size,
-        train_data_limit=train_limit, val_data_limit=val_limit
-    )
-
-    # --- 3. 优化器与调度器 ---
-    optimizer = build_optimizer(model, cfg.training)
-    max_iters = len(train_loader) * cfg.training.max_epochs
-    scheduler = build_scheduler(optimizer, cfg.training, max_iters)
-    scaler = GradScaler() if cfg.device == 'cuda' and GradScaler else None
-
-    # --- 4. 检查点 ---
-    print("\n--- 4. 初始化检查点管理器 ---")
-    ckpt_dir = output_dir / "checkpoints"
-    ckpt_manager = CheckpointManager(ckpt_dir, model, optimizer, scheduler, scaler)
-    start_epoch = 0
-    if hasattr(cfg.checkpointing, 'resume_from') and cfg.checkpointing.resume_from != "none":
-        start_epoch = ckpt_manager.load(cfg.checkpointing.resume_from)
-
-    # --- 5. 训练器 ---
     trainer = Trainer(
         model=model, train_loader=train_loader, val_loader=val_loader,
         optimizer=optimizer, scheduler=scheduler, device=cfg.device,

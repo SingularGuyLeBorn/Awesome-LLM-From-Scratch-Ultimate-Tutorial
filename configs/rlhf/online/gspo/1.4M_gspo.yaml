@@ -1,0 +1,60 @@
+# FILE: configs/rlhf/online/gspo/1.4M_gspo.yaml
+# ===================================================================
+# GSPO (Group Sequence Policy Optimization) 配置 - 1.4M 尺寸 (v3.1 - 路径修复版)
+# ===================================================================
+
+run_name: "gspo-1.4M-test-{timestamp}"
+output_dir: "./runs/"
+device: "cpu"
+console: { verbose: true }
+
+data:
+  # [核心修复] 修正 tokenizer_name 的拼写错误
+  tokenizer_name: "./data_pipeline/processed_data/tinystories_project_vs4096.json"
+  prompt_data_path: "./data_pipeline/prompts/h4_prompts.txt"
+
+model:
+  dim: 128
+  n_layers: 2
+  n_heads: 4
+  n_kv_heads: 2
+  vocab_size: 4096
+  max_seq_len: 256
+  multiple_of: 32
+  norm_eps: 1.0e-5
+  rope_base: 10000
+  dropout: 0.0
+
+rl:
+  algorithm: "gspo"
+  load_from_checkpoint: "./runs/sft/full/sft-full-1.4M-test-20251117-001347/checkpoints/ckpt_best.pth"
+  reward_model_checkpoint: "./runs/rlhf/rm/rm-1.4M-test-20251117-001404/checkpoints/ckpt_best.pth"
+
+  kl_coeff: 0.02
+
+  group_size: 4
+
+  # Rollout/Generate 控制
+  max_prompt_len: 50
+  max_gen_len: 150
+  generate:
+    temperature: 0.7
+    top_k: 50
+
+  # RL 训练流程控制
+  rollout_batches: 8
+  update_epochs: 4
+  update_batch_size: 8
+
+  # GSPO/PPO 核心参数
+  clip_epsilon: 0.2
+  gamma: 0.99
+  lambda_gae: 0.95
+
+training:
+  # 总批次大小 = batch_size * group_size = 2 * 4 = 8
+  batch_size: 2
+  max_epochs: 4
+  learning_rate: 1.0e-5
+  weight_decay: 0.0
+# END OF FILE: configs/rlhf/online/gspo/1.4M_gspo.yaml

@@ -1,4 +1,5 @@
 # FILE: finetune/sft_lora_train.py
+# -*- coding: utf-8 -*-
 """
 [v1.2 - 目录重构版] 使用 LoRA 进行SFT的训练主脚本
 - 输出目录将自动保存到 runs/sft/peft/lora/ 下。

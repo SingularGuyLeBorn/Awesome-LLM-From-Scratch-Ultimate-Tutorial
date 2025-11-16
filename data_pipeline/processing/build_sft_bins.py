@@ -1,7 +1,8 @@
 # FILE: data_pipeline/processing/build_sft_bins.py
 """
-[新增] SFT 数据处理脚本
+[v1.1 - 索引优化版] SFT 数据处理脚本
 功能：将JSONL格式的指令数据转换为模型可以训练的二进制 .bin 文件。
+- 新增：在生成 .bin 文件后，为其创建一个 .idx.npy 索引文件以加速加载。
 """
 import json
 from pathlib import Path
@@ -86,6 +87,15 @@ def process_sft_data(
     logging.info(f"正在保存到二进制文件: {output_bin_file}")
     arr.tofile(output_bin_file)
     logging.info("✅ SFT数据处理完成。")
+
+    # [核心新增] 创建并保存索引文件
+    logging.info("正在为 .bin 文件创建索引以加速加载...")
+    # 使用 memmap 重新加载数据以节省内存
+    data_for_indexing = np.memmap(output_bin_file, dtype=np.uint16, mode='r')
+    boundaries = np.where(data_for_indexing == eos_id)[0]
+    index_file = output_bin_file.with_suffix('.idx.npy')
+    np.save(index_file, boundaries)
+    logging.info(f"✅ 索引文件已创建: {index_file} (包含 {len(boundaries)} 个样本边界)")
 
 
 if __name__ == "__main__":

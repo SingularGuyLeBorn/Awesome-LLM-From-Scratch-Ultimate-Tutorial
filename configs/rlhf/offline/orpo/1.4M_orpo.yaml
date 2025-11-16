@@ -1,0 +1,38 @@
+# FILE: configs/rlhf/orpo/1.4M_orpo.yaml
+# ===================================================================
+# ORPO (Odds Ratio Preference Optimization) 配置 - 1.4M 尺寸
+# ===================================================================
+
+run_name: "orpo-1.4M-test-{timestamp}"
+output_dir: "./runs/"
+device: "cpu"
+console: { verbose: true }
+
+data:
+  tokenizer_name: "./data_pipeline/processed_data/tinystories_project_vs4096.json"
+  data_dir: "./data_pipeline/processed_data/"
+
+model:
+  dim: 128
+  n_layers: 2
+  n_heads: 4
+  n_kv_heads: 2
+  vocab_size: 4096
+  multiple_of: 32
+  norm_eps: 1.0e-5
+  max_seq_len: 256
+  dropout: 0.0
+
+offline:
+  algorithm: "orpo"
+  load_from_checkpoint: "./runs/sft/full/sft-full-1.4M-test-20251116-161123/checkpoints/ckpt_best.pth"
+  alpha: 0.1
+
+training:
+  batch_size: 1
+  max_epochs: 4
+  learning_rate: 8.0e-6 # ORPO 的学习率通常介于SFT和DPO之间
+  weight_decay: 0.0
+
+logging: { log_interval: 1 }
+# END OF FILE: configs/rlhf/orpo/1.4M_orpo.yaml

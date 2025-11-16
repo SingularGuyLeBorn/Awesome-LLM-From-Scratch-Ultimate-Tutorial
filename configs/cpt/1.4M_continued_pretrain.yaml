@@ -1,0 +1,62 @@
+# FILE: configs/pretrain/1.4M_continued_pretrain.yaml
+# ===================================================================
+# 继续预训练 / 中期训练 配置 - 1.4M 尺寸模型
+# ===================================================================
+
+run_name: "continued-pretrain-1.4M-test-{timestamp}"
+output_dir: "./runs/"
+device: "cpu"
+console: { verbose: true }
+
+data:
+  # 在此阶段，你可以指向一个新的、高质量的或领域特定的数据集 .bin 文件
+  data_dir: "./data_pipeline/processed_data/"
+  tokenizer_name: "./data_pipeline/processed_data/tinystories_project_vs4096.json"
+  # 可以使用不同的数据量限制
+  train_data_limit: 500
+  val_data_limit: 50
+
+model:
+  # 模型结构必须与加载的检查点完全一致
+  dim: 128
+  n_layers: 2
+  n_heads: 4
+  n_kv_heads: 2
+  vocab_size: 4096
+  multiple_of: 32
+  norm_eps: 1.0e-5
+  max_seq_len: 256
+  dropout: 0.0
+
+training:
+  # [核心配置]
+  # 1. 指定要加载的模型
+  load_from_checkpoint: "./runs/pretrain/pretrain-1.4M-fast-test-20251116-175827/checkpoints/ckpt_best.pth"
+  # 2. 设为 true，只加载模型权重，并重置优化器和学习率
+  load_only_model: true
+
+  # 中期训练通常使用更小的学习率和更短的周期
+  batch_size: 4
+  gradient_accumulation_steps: 1
+  max_epochs: 2 # 假设这是一个短期的能力增强阶段
+  learning_rate: 1.0e-5 # <<<<<<< 学习率远小于从零预训练
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  min_lr_ratio: 0.1
+  clip_grad_norm: 1.0
+  loss_spike_threshold: 5.0
+  max_consecutive_spikes: 5
+  grad_norm_history_size: 100
+  grad_clip_percentile: 0.9
+  dynamic_clip_factor: 1.5
+
+logging:
+  log_interval: 1
+  swanlab: { enable: true, project: "LLM-From-Scratch-MidTraining", experiment_name: "{run_name}" }
+
+checkpointing:
+  save_interval: 5
+  # 此处 resume_from 通常设为 "none"，因为我们是从一个外部检查点开始新任务
+  # 而不是恢复上一次中断的训练
+  resume_from: "none"
+# END OF FILE: configs/pretrain/1.4M_continued_pretrain.yaml

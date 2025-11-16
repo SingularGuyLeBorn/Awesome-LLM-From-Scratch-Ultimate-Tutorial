@@ -1,7 +1,8 @@
 # FILE: finetune/sft_train.py
+# -*- coding: utf-8 -*-
 """
-[v1.4 - 目录重构版] SFT (Supervised Fine-Tuning) 训练主脚本
-- 输出目录将自动保存到 runs/sft/full/ 下。
+[v1.5 - 功能完备版] SFT (Supervised Fine-Tuning) 训练主脚本
+- 新增评估逻辑，以支持保存 best checkpoint。
 """
 import torch
 import argparse
@@ -27,7 +28,7 @@ except ImportError:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="[v1.4] 监督微调 (SFT) 脚本")
+    parser = argparse.ArgumentParser(description="[v1.5] 监督微调 (SFT) 脚本")
     parser.add_argument("--config_path", type=str, required=True, help="指向SFT配置YAML文件的路径")
     args = parser.parse_args()
 
@@ -35,7 +36,6 @@ def main():
     project_base_path = Path(__file__).parent.parent.resolve()
     cfg = load_config(args.config_path, project_base_path)
 
-    # [核心修改] 自动创建层级化输出目录
     timestamp = time.strftime('%Y%m%d-%H%M%S')
     run_name = cfg.run_name.format(timestamp=timestamp)
     base_output_dir = Path(cfg.output_dir)
@@ -59,11 +59,14 @@ def main():
     print(f"模型已移动到设备: {cfg.device}")
 
     # --- 2. 数据 ---
+    # SFT通常不需要验证集，但为了保存best模型，我们在这里也加载一个（可以用同一份数据）
     train_loader, val_loader = get_sft_loaders(
         tokenizer_path=Path(cfg.data.tokenizer_name),
         sft_bin_file=Path(cfg.data.sft_data_path),
         block_size=cfg.model.max_seq_len,
-        batch_size=cfg.training.batch_size
+        batch_size=cfg.training.batch_size,
+        # 新增：让 SFT 也有验证集
+        provide_val_loader=True
     )
 
     # --- 3. 优化器与调度器 ---
@@ -99,6 +102,8 @@ def main():
         grad_clip_percentile=getattr(cfg.training, 'grad_clip_percentile', 0.9),
         dynamic_clip_factor=getattr(cfg.training, 'dynamic_clip_factor', 1.5)
     )
+
+    # --- [核心修改] 调用完整的 run 方法，它包含评估逻辑 ---
     trainer.run(cfg.training.max_epochs, 0)
 
 

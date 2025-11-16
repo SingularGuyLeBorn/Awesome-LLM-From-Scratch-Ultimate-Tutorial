@@ -1,9 +1,9 @@
-# FILE: configs/rm_config.yaml
+# FILE: configs/rlhf/rm/1.4M_rm.yaml
 # ===================================================================
-# [v1.1 - 目录重构版] 奖励模型 (Reward Model, RM) 专用配置文件
+# 奖励模型 (RM) 训练配置 - 1.4M 尺寸 (v1.1 - 修复版)
 # ===================================================================
 
-run_name: "rm-test-{timestamp}"
+run_name: "rm-1.4M-test-{timestamp}"
 output_dir: "./runs/"
 device: "cpu"
 
@@ -12,6 +12,7 @@ console:
 
 data:
   data_dir: "./data_pipeline/processed_data/"
+  # [核心修复] 为 preference_data_loader 提供 tokenizer_name 以获取 pad_token_id
   tokenizer_name: "./data_pipeline/processed_data/tinystories_project_vs4096.json"
 
 model:
@@ -20,18 +21,17 @@ model:
   n_heads: 4
   n_kv_heads: 2
   vocab_size: 4096
-  max_seq_len: 256
   multiple_of: 32
   norm_eps: 1.0e-5
-  rope_base: 10000
+  max_seq_len: 256
   dropout: 0.0
 
 rm:
-  load_from_checkpoint: "./runs/sft/full/sft-test-20251116-152948/checkpoints/ckpt_latest.pth"
+  load_from_checkpoint: "./runs/sft/full/sft-full-1.4M-test-20251116-161123/checkpoints/ckpt_best.pth"
 
 training:
   batch_size: 2
-  max_epochs: 4 # 减少 epoch 以加速测试
+  max_epochs: 4
   learning_rate: 1.0e-5
   weight_decay: 0.0
   warmup_ratio: 0.1
@@ -39,5 +39,4 @@ training:
 
 logging:
   log_interval: 1
-
-# END OF FILE: configs/rm_config.yaml
+# END OF FILE: configs/rlhf/rm/1.4M_rm.yaml
