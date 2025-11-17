@@ -1,8 +1,8 @@
 # FILE: align/rm_train.py
 # -*- coding: utf-8 -*-
 """
-[v1.3 - 健壮性修复版] 奖励模型 (Reward Model, RM) 训练主脚本。
-- 集成 attention_mask，以实现更精确的奖励值提取。
+[v1.5 - 依赖自动化] 奖励模型 (Reward Model, RM) 训练主脚本。
+- 在 fast_dev_run 模式下，自动覆盖检查点加载路径。
 """
 import torch
 import torch.nn.functional as F
@@ -10,6 +10,7 @@ import argparse
 from pathlib import Path
 import time
 import sys
+import shutil
 
 # --- 路径修复 ---
 project_root = str(Path(__file__).parent.parent)
@@ -28,17 +29,26 @@ def rm_loss(chosen_rewards: torch.Tensor, rejected_rewards: torch.Tensor) -> tor
 
 
 def main():
-    parser = argparse.ArgumentParser(description="奖励模型 (RM) 训练脚本")
+    parser = argparse.ArgumentParser(description="[v1.5] 奖励模型 (RM) 训练脚本")
     parser.add_argument("--config_path", type=str, required=True, help="指向RM配置YAML文件的路径")
+    parser.add_argument("--fast_dev_run", action="store_true", help="启用快速开发运行模式，使用固定名称并清理旧目录")
     args = parser.parse_args()
 
     # --- 0. 配置与日志 ---
     cfg = load_config(args.config_path, Path(__file__).parent.parent.resolve())
 
-    timestamp = time.strftime('%Y%m%d-%H%M%S')
-    run_name = cfg.run_name.format(timestamp=timestamp)
     base_output_dir = Path(cfg.output_dir)
-    output_dir = base_output_dir / "rlhf" / "rm" / run_name
+    if args.fast_dev_run:
+        run_name = "fast-dev-run"
+        output_dir = base_output_dir / "rlhf" / "rm" / run_name
+        if output_dir.exists():
+            print(f"🧹 fast_dev_run 模式: 正在清理旧的开发目录 {output_dir}")
+            shutil.rmtree(output_dir)
+    else:
+        timestamp = time.strftime('%Y%m%d-%H%M%S')
+        run_name = cfg.run_name.format(timestamp=timestamp)
+        output_dir = base_output_dir / "rlhf" / "rm" / run_name
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger = build_loggers(cfg, output_dir, "rm_run")
@@ -46,11 +56,22 @@ def main():
     # --- 1. 初始化模型 ---
     reward_model = build_reward_model(cfg.model).to(cfg.device)
 
-    if cfg.rm.load_from_checkpoint:
+    # [核心修改] 自动路径覆盖
+    if args.fast_dev_run:
+        sft_dev_ckpt_path = base_output_dir / "sft" / "full" / "fast-dev-run" / "checkpoints" / "ckpt_best.pth"
+        print(f"🔩 --fast_dev_run: 自动覆盖检查点加载路径。")
+        print(f"   - YAML中路径 (将被忽略): {cfg.rm.load_from_checkpoint}")
+        print(f"   - 自动解析路径: {sft_dev_ckpt_path}")
+        cfg.rm.load_from_checkpoint = str(sft_dev_ckpt_path)
+
+    if cfg.rm.load_from_checkpoint and Path(cfg.rm.load_from_checkpoint).exists():
         print(f"正在从SFT检查点加载权重: {cfg.rm.load_from_checkpoint}")
         checkpoint = torch.load(cfg.rm.load_from_checkpoint, map_location=cfg.device)
         reward_model.transformer.load_state_dict(checkpoint['model_state_dict'])
         print("✅ RM Transformer 权重加载成功。")
+    else:
+        print(f"⚠️ 警告：SFT检查点 '{cfg.rm.load_from_checkpoint}' 未找到。RM 将从随机初始化的权重开始训练。")
+
 
     # --- 2. 数据 ---
     train_loader = get_preference_loaders(
@@ -77,12 +98,10 @@ def main():
     for epoch in range(cfg.training.max_epochs):
         pbar = tqdm(train_loader, desc=f"Epoch {epoch} [RM Training]")
         total_accuracy = 0
-        # [核心修改] 解包 attention_mask
         for chosen_tokens, rejected_tokens, chosen_mask, rejected_mask in pbar:
             chosen_tokens, rejected_tokens = chosen_tokens.to(cfg.device), rejected_tokens.to(cfg.device)
             chosen_mask, rejected_mask = chosen_mask.to(cfg.device), rejected_mask.to(cfg.device)
 
-            # [核心修改] 将 attention_mask 传递给模型
             chosen_rewards = reward_model(chosen_tokens, attention_mask=chosen_mask)
             rejected_rewards = reward_model(rejected_tokens, attention_mask=rejected_mask)
 

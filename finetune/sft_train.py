@@ -1,14 +1,15 @@
 # FILE: finetune/sft_train.py
 # -*- coding: utf-8 -*-
 """
-[v1.5 - 功能完备版] SFT (Supervised Fine-Tuning) 训练主脚本
-- 新增评估逻辑，以支持保存 best checkpoint。
+[v1.7 - 依赖自动化] SFT (Supervised Fine-Tuning) 训练主脚本
+- 在 fast_dev_run 模式下，自动覆盖检查点加载路径。
 """
 import torch
 import argparse
 from pathlib import Path
 import time
 import sys
+import shutil
 
 # --- 路径修复 ---
 project_root = str(Path(__file__).parent.parent)
@@ -28,18 +29,27 @@ except ImportError:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="[v1.5] 监督微调 (SFT) 脚本")
+    parser = argparse.ArgumentParser(description="[v1.7] 监督微调 (SFT) 脚本")
     parser.add_argument("--config_path", type=str, required=True, help="指向SFT配置YAML文件的路径")
+    parser.add_argument("--fast_dev_run", action="store_true", help="启用快速开发运行模式，使用固定名称并清理旧目录")
     args = parser.parse_args()
 
     # --- 0. 配置与日志 ---
     project_base_path = Path(__file__).parent.parent.resolve()
     cfg = load_config(args.config_path, project_base_path)
 
-    timestamp = time.strftime('%Y%m%d-%H%M%S')
-    run_name = cfg.run_name.format(timestamp=timestamp)
     base_output_dir = Path(cfg.output_dir)
-    output_dir = base_output_dir / "sft" / "full" / run_name
+    if args.fast_dev_run:
+        run_name = "fast-dev-run"
+        output_dir = base_output_dir / "sft" / "full" / run_name
+        if output_dir.exists():
+            print(f"🧹 fast_dev_run 模式: 正在清理旧的开发目录 {output_dir}")
+            shutil.rmtree(output_dir)
+    else:
+        timestamp = time.strftime('%Y%m%d-%H%M%S')
+        run_name = cfg.run_name.format(timestamp=timestamp)
+        output_dir = base_output_dir / "sft" / "full" / run_name
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger = build_loggers(cfg, output_dir, run_name)
@@ -47,25 +57,31 @@ def main():
     # --- 1. 模型 ---
     model = build_model(cfg.model)
 
-    if cfg.sft.load_from_checkpoint:
+    # [核心修改] 自动路径覆盖
+    if args.fast_dev_run:
+        pretrain_dev_ckpt_path = base_output_dir / "pretrain" / "fast-dev-run" / "checkpoints" / "ckpt_best.pth"
+        print(f"🔩 --fast_dev_run: 自动覆盖检查点加载路径。")
+        print(f"   - YAML中路径 (将被忽略): {cfg.sft.load_from_checkpoint}")
+        print(f"   - 自动解析路径: {pretrain_dev_ckpt_path}")
+        cfg.sft.load_from_checkpoint = str(pretrain_dev_ckpt_path)
+
+    if cfg.sft.load_from_checkpoint and Path(cfg.sft.load_from_checkpoint).exists():
         print(f"正在从检查点加载预训练权重: {cfg.sft.load_from_checkpoint}")
         checkpoint = torch.load(cfg.sft.load_from_checkpoint, map_location=cfg.device)
         model.load_state_dict(checkpoint['model_state_dict'])
         print("✅ 预训练权重加载成功。")
     else:
-        print("⚠️ 警告：未提供预训练检查点，将从头开始训练模型。")
+        print(f"⚠️ 警告：检查点 '{cfg.sft.load_from_checkpoint}' 未找到。将从头开始训练模型。")
 
     model.to(cfg.device)
     print(f"模型已移动到设备: {cfg.device}")
 
     # --- 2. 数据 ---
-    # SFT通常不需要验证集，但为了保存best模型，我们在这里也加载一个（可以用同一份数据）
     train_loader, val_loader = get_sft_loaders(
         tokenizer_path=Path(cfg.data.tokenizer_name),
         sft_bin_file=Path(cfg.data.sft_data_path),
         block_size=cfg.model.max_seq_len,
         batch_size=cfg.training.batch_size,
-        # 新增：让 SFT 也有验证集
         provide_val_loader=True
     )
 
@@ -103,7 +119,6 @@ def main():
         dynamic_clip_factor=getattr(cfg.training, 'dynamic_clip_factor', 1.5)
     )
 
-    # --- [核心修改] 调用完整的 run 方法，它包含评估逻辑 ---
     trainer.run(cfg.training.max_epochs, 0)
 
 

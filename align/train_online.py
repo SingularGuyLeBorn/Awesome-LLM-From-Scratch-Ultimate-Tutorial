@@ -1,8 +1,8 @@
 # FILE: align/train_online.py
 # -*- coding: utf-8 -*-
 """
-[v3.1 - 理论完备版启动器] 通用在线 RL 对齐训练脚本 (PPO, GSPO, etc.)
-- 为PPO创建单一优化器，以支持统一损失函数。
+[v3.3 - 依赖自动化] 通用在线 RL 对齐训练脚本 (PPO, GSPO, etc.)
+- 在 fast_dev_run 模式下，自动覆盖检查点加载路径。
 """
 import argparse
 from pathlib import Path
@@ -10,6 +10,7 @@ import time
 import sys
 from tokenizers import Tokenizer
 import torch
+import shutil
 
 project_root = str(Path(__file__).parent.parent)
 if project_root not in sys.path:
@@ -52,14 +53,27 @@ def log_run_details(cfg, output_dir):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="[v3.1] 通用在线 RL 对齐训练启动器")
+    parser = argparse.ArgumentParser(description="[v3.3] 通用在线 RL 对齐训练启动器")
     parser.add_argument("--config_path", type=str, required=True, help="指向RL配置YAML文件的路径")
+    parser.add_argument("--fast_dev_run", action="store_true", help="启用快速开发运行模式，使用固定名称并清理旧目录")
     args = parser.parse_args()
 
     cfg = load_config(args.config_path, Path(__file__).parent.parent.resolve())
     algorithm = cfg.rl.algorithm.lower()
-    output_dir = Path(
-        cfg.output_dir) / "rlhf" / "online" / f"{cfg.run_name.format(timestamp=time.strftime('%Y%m%d-%H%M%S'))}"
+
+    base_output_dir = Path(cfg.output_dir)
+    if args.fast_dev_run:
+        run_name = "fast-dev-run"
+        # 路径名中加入算法名以区分 PPO/GSPO 的 dev run
+        output_dir = base_output_dir / "rlhf" / "online" / f"{algorithm}-{run_name}"
+        if output_dir.exists():
+            print(f"🧹 fast_dev_run 模式: 正在清理旧的开发目录 {output_dir}")
+            shutil.rmtree(output_dir)
+    else:
+        timestamp = time.strftime('%Y%m%d-%H%M%S')
+        run_name = cfg.run_name.format(timestamp=timestamp)
+        output_dir = base_output_dir / "rlhf" / "online" / run_name
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger = build_loggers(cfg, output_dir, "rl_run")
@@ -73,16 +87,34 @@ def main():
     reward_model = build_reward_model(cfg.model).to(cfg.device)
 
     print("\n--- 2. 加载检查点权重 ---")
-    sft_ckpt = torch.load(cfg.rl.load_from_checkpoint, map_location=cfg.device)
-    policy_model.load_state_dict(sft_ckpt['model_state_dict'])
-    reference_model.load_state_dict(sft_ckpt['model_state_dict'])
-    if value_model:
-        value_model.transformer.load_state_dict(sft_ckpt['model_state_dict'])
-    print(f"✅ Policy, Reference, Value (if any) 模型已从 SFT 检查点 '{cfg.rl.load_from_checkpoint}' 加载。")
+    # [核心修改] 自动路径覆盖
+    if args.fast_dev_run:
+        sft_dev_ckpt_path = base_output_dir / "sft" / "full" / "fast-dev-run" / "checkpoints" / "ckpt_best.pth"
+        rm_dev_ckpt_path = base_output_dir / "rlhf" / "rm" / "fast-dev-run" / "checkpoints" / "ckpt_best.pth"
+        print(f"🔩 --fast_dev_run: 自动覆盖SFT和RM检查点加载路径。")
+        cfg.rl.load_from_checkpoint = str(sft_dev_ckpt_path)
+        cfg.rl.reward_model_checkpoint = str(rm_dev_ckpt_path)
+        print(f"   - SFT Ckpt -> {sft_dev_ckpt_path}")
+        print(f"   - RM Ckpt  -> {rm_dev_ckpt_path}")
 
-    rm_ckpt = torch.load(cfg.rl.reward_model_checkpoint, map_location=cfg.device)
-    reward_model.load_state_dict(rm_ckpt['model_state_dict'])
-    print(f"✅ Reward 模型已从专用检查点 '{cfg.rl.reward_model_checkpoint}' 加载。")
+    # 加载 SFT 检查点
+    if cfg.rl.load_from_checkpoint and Path(cfg.rl.load_from_checkpoint).exists():
+        sft_ckpt = torch.load(cfg.rl.load_from_checkpoint, map_location=cfg.device)
+        policy_model.load_state_dict(sft_ckpt['model_state_dict'])
+        reference_model.load_state_dict(sft_ckpt['model_state_dict'])
+        if value_model:
+            value_model.transformer.load_state_dict(sft_ckpt['model_state_dict'])
+        print(f"✅ Policy, Reference, Value (if any) 模型已从 SFT 检查点 '{cfg.rl.load_from_checkpoint}' 加载。")
+    else:
+        print(f"⚠️ 警告: SFT 检查点 '{cfg.rl.load_from_checkpoint}' 未找到，模型将使用随机权重。")
+
+    # 加载 RM 检查点
+    if cfg.rl.reward_model_checkpoint and Path(cfg.rl.reward_model_checkpoint).exists():
+        rm_ckpt = torch.load(cfg.rl.reward_model_checkpoint, map_location=cfg.device)
+        reward_model.load_state_dict(rm_ckpt['model_state_dict'])
+        print(f"✅ Reward 模型已从专用检查点 '{cfg.rl.reward_model_checkpoint}' 加载。")
+    else:
+        print(f"⚠️ 警告: 奖励模型检查点 '{cfg.rl.reward_model_checkpoint}' 未找到，奖励模型将使用随机权重。")
 
     for param in reference_model.parameters():
         param.requires_grad = False
@@ -98,17 +130,14 @@ def main():
     print("\n--- 4. 初始化优化器 ---")
     policy_optimizer, value_optimizer = None, None
     if algorithm == 'ppo':
-        # [核心修改] PPO 使用单一优化器管理 policy 和 value model
         params_to_optimize = list(policy_model.parameters()) + list(value_model.parameters())
-        # 创建一个临时的SimpleNamespace来传递给build_optimizer
         ppo_optim_config = lambda: None
         setattr(ppo_optim_config, 'learning_rate', cfg.training.learning_rate)
         setattr(ppo_optim_config, 'weight_decay', cfg.training.weight_decay)
-        # 合并模型参数并创建单一优化器
         combined_model = torch.nn.ModuleList([policy_model, value_model])
         policy_optimizer = build_optimizer(combined_model, ppo_optim_config)
-        value_optimizer = None  # 不再需要独立的 value_optimizer
-    else:  # GRPO, GSPO
+        value_optimizer = None
+    else:
         policy_optimizer = build_optimizer(policy_model, cfg.training)
         value_optimizer = None
 
@@ -126,7 +155,7 @@ def main():
         logger=logger,
         ckpt_manager=ckpt_manager,
         policy_optimizer=policy_optimizer,
-        value_optimizer=value_optimizer,  # 传递None给GRPO/GSPO
+        value_optimizer=value_optimizer,
     )
 
     trainer.train()
@@ -134,4 +163,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
+# END OF FILE: align/train_online.py

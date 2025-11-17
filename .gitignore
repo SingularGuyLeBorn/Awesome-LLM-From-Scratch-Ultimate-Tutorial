@@ -41,6 +41,7 @@ MANIFEST
 # Ignore all downloaded and processed data. These are large and can be regenerated.
 data_pipeline/downloaded_data/
 data_pipeline/processed_data/
+data_pipeline/prompts
 
 # You can be more specific if you want to track some small metadata files in the future
 # For now, ignoring the whole directories is the safest.
@@ -80,4 +81,7 @@ ehthumbs_vista.db
 all_code.txt
 getallcode.py
 
+/runs/
+
 # END OF FILE: .gitignore
+

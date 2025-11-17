@@ -1,8 +1,8 @@
 # FILE: align/train_offline.py
 # -*- coding: utf-8 -*-
 """
-[v3.1 - 修复版] 通用离线对齐训练脚本 (DPO, ORPO, etc.)
-- 修复了调用 get_preference_loaders 时缺少 tokenizer_name 参数的错误。
+[v3.3 - 依赖自动化] 通用离线对齐训练脚本 (DPO, ORPO, etc.)
+- 在 fast_dev_run 模式下，自动覆盖检查点加载路径。
 """
 import argparse
 from pathlib import Path
@@ -10,6 +10,7 @@ import time
 import sys
 from copy import deepcopy
 from tokenizers import Tokenizer
+import shutil
 
 project_root = str(Path(__file__).parent.parent)
 if project_root not in sys.path: sys.path.insert(0, project_root)
@@ -23,16 +24,30 @@ import torch
 
 
 def main():
-    parser = argparse.ArgumentParser(description="[v3.1] 通用离线对齐训练启动器")
+    parser = argparse.ArgumentParser(description="[v3.3] 通用离线对齐训练启动器")
     parser.add_argument("--config_path", type=str, required=True, help="指向离线对齐配置YAML文件的路径")
+    parser.add_argument("--fast_dev_run", action="store_true", help="启用快速开发运行模式，使用固定名称并清理旧目录")
     args = parser.parse_args()
 
     # --- 1. 加载配置和初始化 ---
     cfg = load_config(args.config_path, Path(__file__).parent.parent.resolve())
     algorithm = cfg.offline.algorithm.lower()
-    output_dir = Path(
-        cfg.output_dir) / "rlhf" / "offline" / f"{cfg.run_name.format(timestamp=time.strftime('%Y%m%d-%H%M%S'))}"
+
+    base_output_dir = Path(cfg.output_dir)
+    if args.fast_dev_run:
+        run_name = "fast-dev-run"
+        # 路径名中加入算法名以区分 DPO/ORPO 的 dev run
+        output_dir = base_output_dir / "rlhf" / "offline" / f"{algorithm}-{run_name}"
+        if output_dir.exists():
+            print(f"🧹 fast_dev_run 模式: 正在清理旧的开发目录 {output_dir}")
+            shutil.rmtree(output_dir)
+    else:
+        timestamp = time.strftime('%Y%m%d-%H%M%S')
+        run_name = cfg.run_name.format(timestamp=timestamp)
+        output_dir = base_output_dir / "rlhf" / "offline" / run_name
+
     output_dir.mkdir(parents=True, exist_ok=True)
+
 
     logger = build_loggers(cfg, output_dir, f"{algorithm}_run")
     tokenizer = Tokenizer.from_file(cfg.data.tokenizer_name)
@@ -44,15 +59,25 @@ def main():
     for param in reference_model.parameters():
         param.requires_grad = False
 
-    print(f"正在从SFT检查点加载权重: {cfg.offline.load_from_checkpoint}")
-    checkpoint = torch.load(cfg.offline.load_from_checkpoint, map_location=cfg.device)
-    policy_model.load_state_dict(checkpoint['model_state_dict'])
-    reference_model.load_state_dict(checkpoint['model_state_dict'])
-    print("✅ Policy 和 Reference 模型权重加载成功。")
+    # [核心修改] 自动路径覆盖
+    if args.fast_dev_run:
+        sft_dev_ckpt_path = base_output_dir / "sft" / "full" / "fast-dev-run" / "checkpoints" / "ckpt_best.pth"
+        print(f"🔩 --fast_dev_run: 自动覆盖检查点加载路径。")
+        print(f"   - YAML中路径 (将被忽略): {cfg.offline.load_from_checkpoint}")
+        print(f"   - 自动解析路径: {sft_dev_ckpt_path}")
+        cfg.offline.load_from_checkpoint = str(sft_dev_ckpt_path)
+
+    if cfg.offline.load_from_checkpoint and Path(cfg.offline.load_from_checkpoint).exists():
+        print(f"正在从SFT检查点加载权重: {cfg.offline.load_from_checkpoint}")
+        checkpoint = torch.load(cfg.offline.load_from_checkpoint, map_location=cfg.device)
+        policy_model.load_state_dict(checkpoint['model_state_dict'])
+        reference_model.load_state_dict(checkpoint['model_state_dict'])
+        print("✅ Policy 和 Reference 模型权重加载成功。")
+    else:
+        print(f"⚠️ 警告：SFT检查点 '{cfg.offline.load_from_checkpoint}' 未找到。模型将从随机权重开始。")
 
     # --- 3. 构建数据加载器 ---
     print("\n--- 构建偏好数据加载器 ---")
-    # [核心修复] 将 tokenizer_name 传递给 get_preference_loaders
     train_loader = get_preference_loaders(
         data_dir=Path(cfg.data.data_dir),
         tokenizer_name=cfg.data.tokenizer_name,

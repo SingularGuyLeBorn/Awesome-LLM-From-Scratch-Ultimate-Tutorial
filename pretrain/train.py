@@ -1,14 +1,15 @@
 # FILE: pretrain/train.py
 # -*- coding: utf-8 -*-
 """
-【v3.5 - 统一训练引擎版】预训练主脚本。
-- 可同时处理“从零预训练”和“继续预训练/中期训练”。
+【v3.6 - 开发模式增强】预训练主脚本。
+- 新增 --fast_dev_run 命令行标志，用于固定运行名称并自动清理目录，方便快速迭代。
 """
 import torch
 import argparse
 from pathlib import Path
 import time
 import sys
+import shutil
 
 # --- 路径修复 ---
 project_root = str(Path(__file__).parent.parent)
@@ -29,18 +30,28 @@ except ImportError:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="[v3.5] 统一预训练/继续预训练脚本")
+    parser = argparse.ArgumentParser(description="[v3.6] 统一预训练/继续预训练脚本")
     parser.add_argument("--config_path", type=str, required=True, help="指向配置YAML文件的路径")
+    parser.add_argument("--fast_dev_run", action="store_true", help="启用快速开发运行模式，使用固定名称并清理旧目录")
     args = parser.parse_args()
 
     # --- 0. 配置与日志 ---
     project_base_path = Path(__file__).parent.parent.resolve()
     cfg = load_config(args.config_path, project_base_path)
 
-    timestamp = time.strftime('%Y%m%d-%H%M%S')
-    run_name = cfg.run_name.format(timestamp=timestamp)
+    # [核心修改] 根据 --fast_dev_run 标志决定运行名称和目录
     base_output_dir = Path(cfg.output_dir)
-    output_dir = base_output_dir / "pretrain" / run_name
+    if args.fast_dev_run:
+        run_name = "fast-dev-run"
+        output_dir = base_output_dir / "pretrain" / run_name
+        if output_dir.exists():
+            print(f"🧹 fast_dev_run 模式: 正在清理旧的开发目录 {output_dir}")
+            shutil.rmtree(output_dir)
+    else:
+        timestamp = time.strftime('%Y%m%d-%H%M%S')
+        run_name = cfg.run_name.format(timestamp=timestamp)
+        output_dir = base_output_dir / "pretrain" / run_name
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger = build_loggers(cfg, output_dir, run_name)
