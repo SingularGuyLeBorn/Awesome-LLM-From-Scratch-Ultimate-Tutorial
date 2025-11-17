@@ -1,7 +1,8 @@
-# FILE: finetune/peft/lora.py
+# FILE: finetune/peft/lora/lora.py
 """
 [v1.1 - 核心逻辑重构版] LoRA (Low-Rank Adaptation) 的核心实现。
 - 彻底修复了 apply_lora_to_model 的递归和替换逻辑。
+- [重构] 已迁移到 finetune/peft/lora/ 目录。
 """
 import torch
 import torch.nn as nn
@@ -84,4 +85,4 @@ def freeze_base_model_for_lora(model: nn.Module):
 
     trainable_ratio = (trainable_params / total_params) * 100 if total_params > 0 else 0
     print(f"\nLoRA 已应用。可训练参数: {trainable_params:,} (占总参数 {trainable_ratio:.2f}%)")
-# END OF FILE: finetune/peft/lora.py
+# END OF FILE: finetune/peft/lora/lora.py

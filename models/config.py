@@ -1,8 +1,7 @@
 # FILE: models/config.py
 """
-[v2.0 - 健壮性重构]
-- ModelArgs 现在可以安全地忽略未知的关键字参数。
-- 保证了 __post_init__ 逻辑的稳定执行。
+[v2.1 - 新增梯度检查点开关]
+- ModelArgs 现在包含 use_activation_checkpointing 标志。
 """
 from dataclasses import dataclass, field
 from typing import Any
@@ -33,7 +32,10 @@ class ModelArgs:
     # 最大序列长度
     max_seq_len: int = 2048
 
-    # [核心修复] 允许 dataclass 接受并忽略未在字段中定义的额外参数
+    # [核心新增] 是否在训练时使用梯度检查点以节省内存
+    use_activation_checkpointing: bool = False
+
+    # 允许 dataclass 接受并忽略未在字段中定义的额外参数
     def __init__(self, **kwargs):
         # 获取所有已定义的字段名
         defined_fields = {f.name for f in self.__dataclass_fields__.values()}

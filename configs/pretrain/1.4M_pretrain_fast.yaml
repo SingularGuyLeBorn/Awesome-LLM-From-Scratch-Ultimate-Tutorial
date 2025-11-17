@@ -1,6 +1,6 @@
 # FILE: configs/pretrain/1.4M_pretrain_fast.yaml
 # ===================================================================
-# 预训练配置 - 1.4M 尺寸模型 - 快速测试版 (语法修复)
+# 预训练配置 - 1.4M 尺寸模型 - 快速测试版 (v2 - 启用梯度检查点)
 # ===================================================================
 
 run_name: "pretrain-1.4M-fast-test-{timestamp}"
@@ -41,6 +41,8 @@ training:
   grad_norm_history_size: 100
   grad_clip_percentile: 0.9
   dynamic_clip_factor: 1.5
+  # [核心新增] 启用梯度检查点以节省内存
+  use_activation_checkpointing: true
 
 logging:
   log_interval: 1

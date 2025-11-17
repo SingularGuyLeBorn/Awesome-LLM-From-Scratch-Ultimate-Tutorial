@@ -1,8 +1,8 @@
-# FILE: finetune/sft_lora_train.py
+# FILE: finetune/peft/lora/sft_lora_train.py
 # -*- coding: utf-8 -*-
 """
-[v1.4 - 依赖自动化] 使用 LoRA 进行SFT的训练主脚本
-- 在 fast_dev_run 模式下，自动覆盖检查点加载路径。
+[v1.6 - 语义净化] 使用 LoRA 进行SFT的训练主脚本
+- 更新脚本以使用新的配置字段名 `base_model_checkpoint`。
 """
 import torch
 import argparse
@@ -12,7 +12,7 @@ import sys
 import shutil
 
 # --- 路径修复 ---
-project_root = str(Path(__file__).parent.parent)
+project_root = str(Path(__file__).parent.parent.parent.parent)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
@@ -21,7 +21,7 @@ from utils.builders import build_model, build_optimizer, build_scheduler, build_
 from finetune.sft_data_loader import get_sft_loaders
 from pretrain.components.checkpointing import CheckpointManager
 from pretrain.components.training_loop import Trainer
-from finetune.peft.lora import apply_lora_to_model, freeze_base_model_for_lora
+from finetune.peft.lora.lora import apply_lora_to_model, freeze_base_model_for_lora
 
 try:
     from torch.cuda.amp import GradScaler
@@ -30,13 +30,13 @@ except ImportError:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="[v1.4] [LoRA] 监督微调 (SFT) 脚本")
+    parser = argparse.ArgumentParser(description="[v1.6] [LoRA] 监督微调 (SFT) 脚本")
     parser.add_argument("--config_path", type=str, required=True, help="指向SFT LoRA配置YAML文件的路径")
     parser.add_argument("--fast_dev_run", action="store_true", help="启用快速开发运行模式，使用固定名称并清理旧目录")
     args = parser.parse_args()
 
     # --- 0. 配置与日志 ---
-    project_base_path = Path(__file__).parent.parent.resolve()
+    project_base_path = Path(__file__).parent.parent.parent.parent.resolve()
     cfg = load_config(args.config_path, project_base_path)
 
     base_output_dir = Path(cfg.output_dir)
@@ -56,23 +56,25 @@ def main():
     logger = build_loggers(cfg, output_dir, run_name)
 
     # --- 1. 模型 ---
+    cfg.model.use_activation_checkpointing = getattr(cfg.training, 'use_activation_checkpointing', False)
     model = build_model(cfg.model)
 
-    # [核心修改] 自动路径覆盖
+    # [核心修改] 读取新的配置字段
+    ckpt_path = cfg.sft.base_model_checkpoint
     if args.fast_dev_run:
         pretrain_dev_ckpt_path = base_output_dir / "pretrain" / "fast-dev-run" / "checkpoints" / "ckpt_best.pth"
         print(f"🔩 --fast_dev_run: 自动覆盖检查点加载路径。")
-        print(f"   - YAML中路径 (将被忽略): {cfg.sft.load_from_checkpoint}")
+        print(f"   - YAML中路径 (将被忽略): {ckpt_path}")
         print(f"   - 自动解析路径: {pretrain_dev_ckpt_path}")
-        cfg.sft.load_from_checkpoint = str(pretrain_dev_ckpt_path)
+        ckpt_path = str(pretrain_dev_ckpt_path)
 
-    if cfg.sft.load_from_checkpoint and Path(cfg.sft.load_from_checkpoint).exists():
-        print(f"正在从检查点加载预训练权重: {cfg.sft.load_from_checkpoint}")
-        checkpoint = torch.load(cfg.sft.load_from_checkpoint, map_location=cfg.device)
+    if ckpt_path and Path(ckpt_path).exists():
+        print(f"正在从基础模型检查点加载权重: {ckpt_path}")
+        checkpoint = torch.load(ckpt_path, map_location=cfg.device)
         model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         print("✅ 预训练权重加载成功。")
     else:
-        print(f"⚠️ 警告：检查点 '{cfg.sft.load_from_checkpoint}' 未找到。LoRA 将在随机初始化的模型上应用。")
+        print(f"⚠️ 警告：基础模型检查点 '{ckpt_path}' 未找到。LoRA 将在随机初始化的模型上应用。")
 
     apply_lora_to_model(
         model,
@@ -132,4 +134,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-# END OF FILE: finetune/sft_lora_train.py
+# END OF FILE: finetune/peft/lora/sft_lora_train.py

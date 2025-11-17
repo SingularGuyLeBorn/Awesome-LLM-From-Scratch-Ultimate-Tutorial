@@ -1,6 +1,6 @@
 # FILE: configs/rlhf/offline/dpo/1.4M_dpo.yaml
 # ===================================================================
-# DPO 配置 - 1.4M 尺寸 (v3.0 - 理论完备版)
+# DPO 配置 - 1.4M 尺寸 (v4 - 字段语义净化)
 # ===================================================================
 
 run_name: "dpo-1.4M-test-{timestamp}"
@@ -24,13 +24,13 @@ model:
   norm_eps: 1.0e-5
   max_seq_len: 256
   dropout: 0.0
+  use_activation_checkpointing: true
 
 offline:
   algorithm: "dpo"
-  # 损失函数现在只在回答部分计算 (response-only)
-  load_from_checkpoint: "./runs/sft/full/sft-full-1.4M-test-20251117-001347/checkpoints/ckpt_best.pth"
+  # [核心修改] 字段名 "load_from_checkpoint" -> "sft_model_checkpoint"，语义更清晰
+  sft_model_checkpoint: "./runs/sft/full/sft-full-1.4M-test-20251117-001347/checkpoints/ckpt_best.pth"
   beta: 0.1
-  # [核心新增] 标签平滑，增加对噪声数据的鲁棒性
   label_smoothing: 0.0
 
 
@@ -42,4 +42,3 @@ training:
 
 logging:
   log_interval: 1
-# END OF FILE: configs/rlhf/offline/dpo/1.4M_dpo.yaml

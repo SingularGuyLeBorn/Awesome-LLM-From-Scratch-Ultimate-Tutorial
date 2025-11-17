@@ -1,8 +1,8 @@
 # FILE: align/rm_train.py
 # -*- coding: utf-8 -*-
 """
-[v1.5 - 依赖自动化] 奖励模型 (Reward Model, RM) 训练主脚本。
-- 在 fast_dev_run 模式下，自动覆盖检查点加载路径。
+[v1.6 - 语义净化] 奖励模型 (Reward Model, RM) 训练主脚本。
+- 更新脚本以使用新的配置字段名 `sft_model_checkpoint`。
 """
 import torch
 import torch.nn.functional as F
@@ -29,7 +29,7 @@ def rm_loss(chosen_rewards: torch.Tensor, rejected_rewards: torch.Tensor) -> tor
 
 
 def main():
-    parser = argparse.ArgumentParser(description="[v1.5] 奖励模型 (RM) 训练脚本")
+    parser = argparse.ArgumentParser(description="[v1.6] 奖励模型 (RM) 训练脚本")
     parser.add_argument("--config_path", type=str, required=True, help="指向RM配置YAML文件的路径")
     parser.add_argument("--fast_dev_run", action="store_true", help="启用快速开发运行模式，使用固定名称并清理旧目录")
     args = parser.parse_args()
@@ -54,23 +54,25 @@ def main():
     logger = build_loggers(cfg, output_dir, "rm_run")
 
     # --- 1. 初始化模型 ---
+    cfg.model.use_activation_checkpointing = getattr(cfg.training, 'use_activation_checkpointing', False)
     reward_model = build_reward_model(cfg.model).to(cfg.device)
 
-    # [核心修改] 自动路径覆盖
+    # [核心修改] 读取新的配置字段
+    ckpt_path = cfg.rm.sft_model_checkpoint
     if args.fast_dev_run:
         sft_dev_ckpt_path = base_output_dir / "sft" / "full" / "fast-dev-run" / "checkpoints" / "ckpt_best.pth"
-        print(f"🔩 --fast_dev_run: 自动覆盖检查点加载路径。")
-        print(f"   - YAML中路径 (将被忽略): {cfg.rm.load_from_checkpoint}")
+        print(f"🔩 --fast_dev_run: 自动覆盖SFT模型检查点加载路径。")
+        print(f"   - YAML中路径 (将被忽略): {ckpt_path}")
         print(f"   - 自动解析路径: {sft_dev_ckpt_path}")
-        cfg.rm.load_from_checkpoint = str(sft_dev_ckpt_path)
+        ckpt_path = str(sft_dev_ckpt_path)
 
-    if cfg.rm.load_from_checkpoint and Path(cfg.rm.load_from_checkpoint).exists():
-        print(f"正在从SFT检查点加载权重: {cfg.rm.load_from_checkpoint}")
-        checkpoint = torch.load(cfg.rm.load_from_checkpoint, map_location=cfg.device)
+    if ckpt_path and Path(ckpt_path).exists():
+        print(f"正在从SFT检查点加载权重: {ckpt_path}")
+        checkpoint = torch.load(ckpt_path, map_location=cfg.device)
         reward_model.transformer.load_state_dict(checkpoint['model_state_dict'])
         print("✅ RM Transformer 权重加载成功。")
     else:
-        print(f"⚠️ 警告：SFT检查点 '{cfg.rm.load_from_checkpoint}' 未找到。RM 将从随机初始化的权重开始训练。")
+        print(f"⚠️ 警告：SFT检查点 '{ckpt_path}' 未找到。RM 将从随机初始化的权重开始训练。")
 
 
     # --- 2. 数据 ---

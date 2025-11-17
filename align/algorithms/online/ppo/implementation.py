@@ -1,8 +1,8 @@
-# FILE: align/algorithms/ppo/implementation.py
+# FILE: align/algorithms/online/ppo/implementation.py
 # -*- coding: utf-8 -*-
 """
-[v2.0 - 理论完备版] PPO (Proximal Policy Optimization) 核心算法实现。
-- 实现了完整版的 GAE (Generalized Advantage Estimation)。
+[v2.2 - 掩码修复版] PPO (Proximal Policy Optimization) 核心算法实现。
+- 核心修复: ppo_loss 现在接收一个掩码(mask)，确保损失只在有效token上计算。
 """
 import torch
 from typing import Tuple
@@ -16,19 +16,13 @@ def compute_advantages(
         lambda_gae: float = 0.95
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    [核心重构] 使用 GAE (Generalized Advantage Estimation) 计算优势和回报。
-    严格遵循原始论文和主流库 (TRL) 的实现。
+    使用 GAE (Generalized Advantage Estimation) 计算优势和回报。
 
-    Args:
-        rewards: 奖励张量, 形状 (batch_size, seq_len)
-        values: 价值模型输出的价值张量, 形状 (batch_size, seq_len)
-        mask: 掩码张量，标记非填充部分, 形状 (batch_size, seq_len)
-        gamma: 折扣因子
-        lambda_gae: GAE lambda 参数
+    核心公式 (通过向后迭代高效实现):
+    - TD-error (delta_t) = r_t + gamma * V(s_{t+1}) - V(s_t)
+    - Advantage (A_t)   = delta_t + gamma * lambda * A_{t+1}
 
-    Returns:
-        advantages (torch.Tensor): 优势张量, 形状 (batch_size, seq_len)
-        returns (torch.Tensor): 回报张量 (即价值目标), 形状 (batch_size, seq_len)
+    这个函数正是实现了上述递归公式。
     """
     advantages = torch.zeros_like(rewards)
     last_advantage = 0
@@ -42,13 +36,11 @@ def compute_advantages(
         delta = rewards[:, t] + gamma * next_value - values[:, t]
 
         # 计算 GAE 优势
-        # A_t = delta_t + gamma * lambda * A_{t+1}
         # mask[:, t] 确保我们只在非填充部分累积优势
         last_advantage = delta + gamma * lambda_gae * last_advantage * mask[:, t]
         advantages[:, t] = last_advantage
 
     # 计算回报 (Returns), 即价值函数的目标
-    # returns = advantages + values
     returns = advantages + values
 
     return advantages, returns
@@ -58,10 +50,12 @@ def ppo_loss(
         log_probs: torch.Tensor,
         old_log_probs: torch.Tensor,
         advantages: torch.Tensor,
+        mask: torch.Tensor,
         clip_epsilon: float
 ) -> torch.Tensor:
     """
-    计算 PPO 的裁剪代理目标损失 (与之前版本保持一致，理论正确)。
+    计算 PPO 的裁剪代理目标损失 (Clipped Surrogate Objective)。
+    [核心修改] 新增了 mask 参数。
     """
     # 计算重要性采样比率
     ratios = torch.exp(log_probs - old_log_probs)
@@ -70,8 +64,14 @@ def ppo_loss(
     surr1 = ratios * advantages
     surr2 = torch.clamp(ratios, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * advantages
 
-    # 取两者中的较小者
-    policy_loss = -torch.min(surr1, surr2).mean()
+    # 计算未裁剪的、每个token的损失
+    # (bs, seq_len)
+    loss_unmasked = -torch.min(surr1, surr2)
 
-    return policy_loss
-# END OF FILE: align/algorithms/ppo/implementation.py
+    # 应用掩码，只计算有效token的损失
+    loss_masked = loss_unmasked * mask
+
+    # 对有效token的损失取平均
+    # 加上一个极小值防止 mask.sum() 为0
+    return loss_masked.sum() / (mask.sum() + 1e-8)
+# END OF FILE: align/algorithms/online/ppo/implementation.py

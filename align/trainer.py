@@ -1,8 +1,9 @@
 # FILE: align/trainer.py
 # -*- coding: utf-8 -*-
 """
-[v2.5 - 最终修复版] 统一对齐训练器 (Alignment Trainer)
-- 重构 RLExperienceBuffer 以处理不同算法产生不同数据键的问题，彻底解决 torch.cat 空列表错误。
+[v2.9 - PPO 算法正确性终极修复版] 统一对齐训练器
+- 核心修复: 在 `_update_phase` 中，对 policy_loss, value_loss, kl, entropy 的计算
+  全部应用了掩码 (mask)，确保只在有效 token 上进行计算，修复了 "silent bug"。
 """
 import torch
 import torch.nn.functional as F
@@ -21,8 +22,6 @@ from inference.generate import generate
 
 
 class RLExperienceBuffer:
-    """[最终修复版] 在线对齐算法的经验缓冲区"""
-
     def __init__(self):
         self.reset()
 
@@ -31,16 +30,13 @@ class RLExperienceBuffer:
             self.data[key].append(tensor)
 
     def get_data(self):
-        # [核心修复] 只对非空列表的键进行torch.cat
         return {key: torch.cat(tensors, dim=0) for key, tensors in self.data.items() if tensors}
 
     def reset(self):
-        # [核心修复] 使用 defaultdict 可以优雅地处理不同算法添加不同键的情况
         self.data = defaultdict(list)
 
 
 def get_log_probs(logits, labels):
-    """辅助函数：计算log probabilities"""
     log_probs = F.log_softmax(logits, dim=-1)
     return torch.gather(log_probs, -1, labels.unsqueeze(-1)).squeeze(-1)
 
@@ -135,11 +131,13 @@ class AlignmentTrainer:
             global_step += 1
 
     def _train_online_epoch(self, epoch):
-        self._rollout_phase(epoch); self._update_phase(epoch)
+        self._rollout_phase(epoch);
+        self._update_phase(epoch)
 
     def _rollout_phase(self, epoch):
         if self.algorithm == 'ppo':
-            self.policy_model.eval(); self.value_model.eval()
+            self.policy_model.eval();
+            self.value_model.eval()
         else:
             self.policy_model.eval()
         self.reward_model.eval()
@@ -149,101 +147,148 @@ class AlignmentTrainer:
             try:
                 prompts = next(prompt_iterator).to(self.cfg.device)
             except StopIteration:
-                prompt_iterator = iter(self.train_loader); prompts = next(prompt_iterator).to(self.cfg.device)
+                prompt_iterator = iter(self.train_loader);
+                prompts = next(prompt_iterator).to(self.cfg.device)
 
             group_prompts = prompts.repeat_interleave(self.group_size, dim=0) if self.group_size > 1 else prompts
-            total_len = self.cfg.model.max_seq_len
+            max_new_tokens = self.cfg.rl.max_gen_len
 
             with torch.no_grad():
-                tokens = generate(self.policy_model, group_prompts, total_len,
-                                  eos_id=self.tokenizer.token_to_id("<|endoftext|>"))
-                attention_mask = (tokens != self.pad_token_id).long();
-                mask = (tokens != self.pad_token_id).float()
-                logits = self.policy_model(tokens);
-                ref_logits = self.reference_model(tokens)
-                log_probs = get_log_probs(logits, tokens);
-                ref_log_probs = get_log_probs(ref_logits, tokens)
-                end_rewards = self.reward_model(tokens, attention_mask)
+                tokens = generate(
+                    self.policy_model,
+                    group_prompts,
+                    max_new_tokens=max_new_tokens,
+                    eos_id=self.tokenizer.token_to_id("<|endoftext|>")
+                )
+
+                target_len = self.cfg.model.max_seq_len
+                current_len = tokens.shape[1]
+                pad_len = target_len - current_len
+
+                if pad_len < 0:
+                    tokens = tokens[:, :target_len]
+                    pad_len = 0
+
+                padded_tokens = F.pad(tokens, (0, pad_len), "constant", self.pad_token_id)
+                attention_mask = (padded_tokens != self.pad_token_id).long()
+                mask = (padded_tokens != self.pad_token_id).float()
+
+                logits = self.policy_model(padded_tokens);
+                ref_logits = self.reference_model(padded_tokens)
+                log_probs = get_log_probs(logits, padded_tokens);
+                ref_log_probs = get_log_probs(ref_logits, padded_tokens)
+                end_rewards = self.reward_model(padded_tokens, attention_mask)
+
+                experience_dict = {
+                    "tokens": padded_tokens, "log_probs": log_probs,
+                    "ref_log_probs": ref_log_probs, "mask": mask
+                }
 
                 if self.algorithm == 'ppo':
-                    values = self.value_model(tokens);
-                    kl = log_probs - ref_log_probs;
+                    values = self.value_model(padded_tokens)
+                    kl = log_probs - ref_log_probs
                     rewards = -self.cfg.rl.kl_coeff * kl
-                    last_token_indices = attention_mask.sum(dim=1).long() - 1
-                    last_token_indices = torch.clamp(last_token_indices, 0, rewards.shape[1] - 1)
+
+                    true_seq_lengths = (tokens != self.pad_token_id).sum(dim=1)
+                    last_token_indices = true_seq_lengths - 1
                     batch_indices = torch.arange(tokens.size(0), device=tokens.device)
                     rewards[batch_indices, last_token_indices] += end_rewards
-                    self.experience_buffer.add(
-                        {"tokens": tokens, "log_probs": log_probs, "ref_log_probs": ref_log_probs, "rewards": rewards,
-                         "values": values, "mask": mask})
-                else:  # GRPO / GSPO
+
+                    experience_dict["rewards"] = rewards
+                    experience_dict["values"] = values
+                else:
                     end_rewards_grouped = end_rewards.view(-1, self.group_size)
                     mean_rewards = end_rewards_grouped.mean(dim=1, keepdim=True)
                     std_rewards = end_rewards_grouped.std(dim=1, keepdim=True)
                     advantages_grouped = (end_rewards_grouped - mean_rewards) / (std_rewards + 1e-8)
                     advantages_flat = advantages_grouped.flatten()
                     advantages_unsqueezed = advantages_flat.unsqueeze(1)
-                    advantages = advantages_unsqueezed.expand_as(tokens)
-                    self.experience_buffer.add(
-                        {"tokens": tokens, "log_probs": log_probs, "ref_log_probs": ref_log_probs, "mask": mask,
-                         "advantages": advantages})
+                    advantages = advantages_unsqueezed.expand_as(padded_tokens)
+                    experience_dict["advantages"] = advantages
+
+                self.experience_buffer.add(experience_dict)
 
     def _update_phase(self, epoch):
         if self.algorithm == 'ppo':
-            self.policy_model.train(); self.value_model.train()
+            self.policy_model.train();
+            self.value_model.train()
         else:
             self.policy_model.train()
 
         all_data = self.experience_buffer.get_data()
-
         if not all_data:
             print(f"Epoch {epoch} [Update]: 经验缓冲区为空，跳过更新。")
             return
 
         if self.algorithm == 'ppo':
             advantages, returns = compute_advantages(all_data['rewards'], all_data['values'], all_data['mask'])
-            dataset = TensorDataset(all_data['tokens'], all_data['log_probs'], all_data['ref_log_probs'], advantages,
-                                    returns)
-        else:  # GRPO / GSPO
             dataset = TensorDataset(all_data['tokens'], all_data['log_probs'], all_data['ref_log_probs'],
-                                    all_data['advantages'])
+                                    all_data['mask'], advantages, returns)
+        else:
+            dataset = TensorDataset(all_data['tokens'], all_data['log_probs'], all_data['ref_log_probs'],
+                                    all_data['mask'], all_data['advantages'])
 
         dataloader = DataLoader(dataset, batch_size=self.cfg.rl.update_batch_size, shuffle=True)
 
         for _ in tqdm(range(self.cfg.rl.update_epochs), desc=f"Epoch {epoch} [Update]"):
             for batch in dataloader:
                 if self.algorithm == 'ppo':
-                    tokens, old_log_probs, ref_log_probs, advantages, returns = batch
-                else:  # GRPO / GSPO
-                    tokens, old_log_probs, ref_log_probs, advantages = batch
+                    tokens, old_log_probs, ref_log_probs, mask, advantages, returns = [t.to(self.cfg.device) for t in
+                                                                                       batch]
+                else:
+                    tokens, old_log_probs, ref_log_probs, mask, advantages = [t.to(self.cfg.device) for t in batch]
 
                 current_logits = self.policy_model(tokens)
                 current_log_probs = get_log_probs(current_logits, tokens)
 
                 if self.algorithm == 'ppo':
-                    current_values = self.value_model(tokens).squeeze(-1)
-                    probs = F.softmax(current_logits, dim=-1);
+                    current_values = self.value_model(tokens)
+                    probs = F.softmax(current_logits, dim=-1)
                     log_probs_dist = F.log_softmax(current_logits, dim=-1)
-                    entropy = -(probs * log_probs_dist).sum(dim=-1).mean()
-                    kl = (current_log_probs - ref_log_probs).mean()
-                    policy_loss = ppo_loss(current_log_probs, old_log_probs, advantages, self.cfg.rl.clip_epsilon)
-                    value_loss = F.mse_loss(current_values, returns)
-                    total_loss = policy_loss + self.cfg.rl.kl_coeff * kl - self.cfg.rl.entropy_coef * entropy + self.cfg.rl.value_loss_coef * value_loss
-                    self.policy_optimizer.zero_grad();
-                    total_loss.backward();
+
+                    # [核心修复] 对 kl 和 entropy 进行掩码平均
+                    kl_per_token = current_log_probs - ref_log_probs
+                    kl = (kl_per_token * mask).sum() / mask.sum()
+
+                    entropy_per_token = -(probs * log_probs_dist).sum(dim=-1)
+                    entropy = (entropy_per_token * mask).sum() / mask.sum()
+
+                    # [核心修复] 将 mask 传递给 ppo_loss
+                    policy_loss = ppo_loss(
+                        current_log_probs,
+                        old_log_probs,
+                        advantages,
+                        mask,  # <--- 传递掩码
+                        self.cfg.rl.clip_epsilon
+                    )
+
+                    # [核心修复] 对 value_loss 进行掩码计算
+                    value_loss_unmasked = (current_values - returns).pow(2)
+                    value_loss_masked = value_loss_unmasked * mask
+                    value_loss = value_loss_masked.sum() / mask.sum()
+
+                    total_loss = (
+                        policy_loss
+                        + self.cfg.rl.kl_coeff * kl
+                        - self.cfg.rl.entropy_coef * entropy
+                        + self.cfg.rl.value_loss_coef * value_loss
+                    )
+
+                    self.policy_optimizer.zero_grad()
+                    total_loss.backward()
                     self.policy_optimizer.step()
 
                 elif self.algorithm == 'grpo':
                     policy_loss = grpo_loss(current_log_probs, old_log_probs, advantages, self.cfg.rl.clip_epsilon)
-                    self.policy_optimizer.zero_grad();
-                    policy_loss.backward();
+                    self.policy_optimizer.zero_grad()
+                    policy_loss.backward()
                     self.policy_optimizer.step()
 
                 elif self.algorithm == 'gspo':
                     policy_loss = gspo_loss(current_log_probs.sum(-1), old_log_probs.sum(-1), advantages.mean(-1),
                                             self.cfg.rl.clip_epsilon)
-                    self.policy_optimizer.zero_grad();
-                    policy_loss.backward();
+                    self.policy_optimizer.zero_grad()
+                    policy_loss.backward()
                     self.policy_optimizer.step()
 
         self.experience_buffer.reset()
@@ -253,3 +298,4 @@ class AlignmentTrainer:
         elif 'policy_loss' in locals():
             print(f"Epoch {epoch} update finished. Last batch stats: Policy Loss={policy_loss.item():.4f}")
             self.ckpt_manager.save(epoch, policy_loss.item())
+# END OF FILE: align/trainer.py

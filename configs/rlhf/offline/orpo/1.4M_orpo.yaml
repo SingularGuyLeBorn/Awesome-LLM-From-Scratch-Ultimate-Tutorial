@@ -1,6 +1,6 @@
 # FILE: configs/rlhf/orpo/1.4M_orpo.yaml
 # ===================================================================
-# ORPO (Odds Ratio Preference Optimization) 配置 - 1.4M 尺寸
+# ORPO (Odds Ratio Preference Optimization) 配置 - 1.4M 尺寸 (v2 - 字段语义净化)
 # ===================================================================
 
 run_name: "orpo-1.4M-test-{timestamp}"
@@ -22,10 +22,12 @@ model:
   norm_eps: 1.0e-5
   max_seq_len: 256
   dropout: 0.0
+  use_activation_checkpointing: true
 
 offline:
   algorithm: "orpo"
-  load_from_checkpoint: "./runs/sft/full/sft-full-1.4M-test-20251116-161123/checkpoints/ckpt_best.pth"
+  # [核心修改] 字段名 "load_from_checkpoint" -> "sft_model_checkpoint"，语义更清晰
+  sft_model_checkpoint: "./runs/sft/full/sft-full-1.4M-test-20251116-161123/checkpoints/ckpt_best.pth"
   alpha: 0.1
 
 training:
@@ -35,4 +37,3 @@ training:
   weight_decay: 0.0
 
 logging: { log_interval: 1 }
-# END OF FILE: configs/rlhf/orpo/1.4M_orpo.yaml

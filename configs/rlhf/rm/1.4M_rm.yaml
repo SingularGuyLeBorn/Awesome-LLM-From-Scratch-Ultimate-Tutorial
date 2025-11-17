@@ -1,6 +1,6 @@
 # FILE: configs/rlhf/rm/1.4M_rm.yaml
 # ===================================================================
-# 奖励模型 (RM) 训练配置 - 1.4M 尺寸 (v1.1 - 修复版)
+# 奖励模型 (RM) 训练配置 - 1.4M 尺寸 (v2 - 字段语义净化)
 # ===================================================================
 
 run_name: "rm-1.4M-test-{timestamp}"
@@ -12,7 +12,6 @@ console:
 
 data:
   data_dir: "./data_pipeline/processed_data/"
-  # [核心修复] 为 preference_data_loader 提供 tokenizer_name 以获取 pad_token_id
   tokenizer_name: "./data_pipeline/processed_data/tinystories_project_vs4096.json"
 
 model:
@@ -25,9 +24,11 @@ model:
   norm_eps: 1.0e-5
   max_seq_len: 256
   dropout: 0.0
+  use_activation_checkpointing: true
 
 rm:
-  load_from_checkpoint: "./runs/sft/full/sft-full-1.4M-test-20251116-161123/checkpoints/ckpt_best.pth"
+  # [核心修改] 字段名 "load_from_checkpoint" -> "sft_model_checkpoint"，语义更清晰
+  sft_model_checkpoint: "./runs/sft/full/sft-full-1.4M-test-20251116-161123/checkpoints/ckpt_best.pth"
 
 training:
   batch_size: 2
@@ -39,4 +40,3 @@ training:
 
 logging:
   log_interval: 1
-# END OF FILE: configs/rlhf/rm/1.4M_rm.yaml

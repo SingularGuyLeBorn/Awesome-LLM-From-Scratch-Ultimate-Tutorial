@@ -1,6 +1,6 @@
 # FILE: configs/sft/full/1.4M_sft_full.yaml
 # ===================================================================
-# SFT 全量微调配置 - 1.4M 尺寸模型 (语法修复)
+# SFT 全量微调配置 - 1.4M 尺寸模型 (v3 - 字段语义净化)
 # ===================================================================
 
 run_name: "sft-full-1.4M-test-{timestamp}"
@@ -26,7 +26,8 @@ model:
   dropout: 0.0
 
 sft:
-  load_from_checkpoint: "./runs/pretrain/pretrain-1.4M-fast-test-20251116-160719/checkpoints/ckpt_best.pth"
+  # [核心修改] 字段名 "load_from_checkpoint" -> "base_model_checkpoint"，语义更清晰
+  base_model_checkpoint: "./runs/pretrain/pretrain-1.4M-fast-test-20251116-160719/checkpoints/ckpt_best.pth"
 
 training:
   batch_size: 2
@@ -35,7 +36,10 @@ training:
   learning_rate: 1.0e-5
   weight_decay: 0.0
   clip_grad_norm: 1.0
+  # [核心新增] 启用梯度检查点以节省内存
+  use_activation_checkpointing: true
 
 logging:
   log_interval: 10
+
 # END OF FILE: configs/sft/full/1.4M_sft_full.yaml

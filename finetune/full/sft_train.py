@@ -1,8 +1,9 @@
 # FILE: finetune/full/sft_train.py
 # -*- coding: utf-8 -*-
 """
-[v1.9 - 语义净化] SFT (Supervised Fine-Tuning) 训练主脚本
-- 更新脚本以使用新的配置字段名 `base_model_checkpoint`。
+[v1.7 - 依赖自动化] SFT (Supervised Fine-Tuning) 训练主脚本
+- 在 fast_dev_run 模式下，自动覆盖检查点加载路径。
+- [重构] 已迁移到 finetune/full/ 目录。
 """
 import torch
 import argparse
@@ -12,6 +13,7 @@ import sys
 import shutil
 
 # --- 路径修复 ---
+# 由于文件位置改变，我们需要向上三级才能到达项目根目录
 project_root = str(Path(__file__).parent.parent.parent)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
@@ -29,7 +31,7 @@ except ImportError:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="[v1.9] 监督微调 (SFT) 脚本")
+    parser = argparse.ArgumentParser(description="[v1.7] 监督微调 (SFT) 脚本")
     parser.add_argument("--config_path", type=str, required=True, help="指向SFT配置YAML文件的路径")
     parser.add_argument("--fast_dev_run", action="store_true", help="启用快速开发运行模式，使用固定名称并清理旧目录")
     args = parser.parse_args()
@@ -55,25 +57,23 @@ def main():
     logger = build_loggers(cfg, output_dir, run_name)
 
     # --- 1. 模型 ---
-    cfg.model.use_activation_checkpointing = getattr(cfg.training, 'use_activation_checkpointing', False)
     model = build_model(cfg.model)
 
-    # [核心修改] 读取新的配置字段
-    ckpt_path = cfg.sft.base_model_checkpoint
+    # [核心修改] 自动路径覆盖
     if args.fast_dev_run:
         pretrain_dev_ckpt_path = base_output_dir / "pretrain" / "fast-dev-run" / "checkpoints" / "ckpt_best.pth"
         print(f"🔩 --fast_dev_run: 自动覆盖检查点加载路径。")
-        print(f"   - YAML中路径 (将被忽略): {ckpt_path}")
+        print(f"   - YAML中路径 (将被忽略): {cfg.sft.base_model_checkpoint}")
         print(f"   - 自动解析路径: {pretrain_dev_ckpt_path}")
-        ckpt_path = str(pretrain_dev_ckpt_path)
+        cfg.sft.load_from_checkpoint = str(pretrain_dev_ckpt_path)
 
-    if ckpt_path and Path(ckpt_path).exists():
-        print(f"正在从基础模型检查点加载权重: {ckpt_path}")
-        checkpoint = torch.load(ckpt_path, map_location=cfg.device)
+    if cfg.sft.load_from_checkpoint and Path(cfg.sft.load_from_checkpoint).exists():
+        print(f"正在从检查点加载预训练权重: {cfg.sft.load_from_checkpoint}")
+        checkpoint = torch.load(cfg.sft.load_from_checkpoint, map_location=cfg.device)
         model.load_state_dict(checkpoint['model_state_dict'])
         print("✅ 预训练权重加载成功。")
     else:
-        print(f"⚠️ 警告：基础模型检查点 '{ckpt_path}' 未找到。将从头开始训练模型。")
+        print(f"⚠️ 警告：检查点 '{cfg.sft.load_from_checkpoint}' 未找到。将从头开始训练模型。")
 
     model.to(cfg.device)
     print(f"模型已移动到设备: {cfg.device}")
