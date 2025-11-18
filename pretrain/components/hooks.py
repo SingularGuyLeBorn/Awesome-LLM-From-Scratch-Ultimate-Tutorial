@@ -1,15 +1,16 @@
 # FILE: pretrain/components/hooks.py
 """
 实现用于监控模型内部状态的PyTorch钩子（Hooks）。
-【v2.0 - MoE 适配版】
-- 修复了 MoE 层没有 `w_down` 属性导致的崩溃问题。
-- 针对 MoE 层，改为监控 Router 的梯度，以观察专家选择的学习情况。
+【v2.1 - 鲁棒性修复版】
+- 修复了 'Attention' object has no attribute 'wo' 错误。
+- 增加了智能解包逻辑，能够穿透 Attention Wrapper 和 MoBA Layer 找到底层的 Linear 层。
+- 兼容 Dense FFN 和 MoE Router 的监控。
 """
 import torch
 import torch.nn as nn
-from typing import List, Dict
+from typing import List, Dict, Optional
 
-# 动态导入 MoELayer 以进行类型检查，避免循环导入
+# 动态导入 MoELayer 以进行类型检查
 try:
     from models.blocks.feedforward.moe import MoELayer
 except ImportError:
@@ -17,21 +18,14 @@ except ImportError:
 
 
 class ForwardHook:
-    """
-    一个前向钩子，用于捕获模块输出激活值的详细统计数据。
-    """
-
     def __init__(self, name: str):
         self.name = name
-        self.stats = {}  # 使用字典存储所有统计数据
+        self.stats = {}
 
     def __call__(self, module, input, output):
-        # output可能是元组（例如LSTM），我们只关心第一个张量
         if isinstance(output, tuple):
             output = output[0]
-
         tensor = output.detach().float()
-        # 计算更详细的统计信息
         self.stats = {
             f"activations/{self.name}_norm": torch.norm(tensor).item(),
             f"activations/{self.name}_max": tensor.max().item(),
@@ -40,24 +34,17 @@ class ForwardHook:
         }
 
     def get_metric(self) -> Dict[str, float]:
-        return self.stats  # 返回完整的统计字典
+        return self.stats
 
 
 class BackwardHook:
-    """
-    一个反向钩子，用于捕获模块权重梯度的详细统计数据。
-    """
-
     def __init__(self, name: str, module: nn.Module):
         self.name = name
         self.module = module
         self.stats = {}
 
     def __call__(self, grad):
-        # 这个钩子附加在张量上，所以它的输入直接是梯度
-        if grad is None:
-            return
-
+        if grad is None: return
         tensor = grad.detach().float()
         self.stats = {
             f"gradients/{self.name}_norm": torch.norm(tensor).item(),
@@ -70,90 +57,98 @@ class BackwardHook:
         return self.stats
 
 
-def register_hooks(model: nn.Module) -> List:
+def _unwrap_attention(module: nn.Module) -> nn.Module:
     """
-    遍历模型，为所有关键层注册前向和反向钩子，以实现全面的“内科”监控。
+    递归解包 Attention 模块，直到找到具体的实现层 (Standard/MLA/Linear)。
+    处理: Attention(Wrapper) -> [MoBA] -> Implementation
+    """
+    # 如果有 impl 属性，说明是 Wrapper (Attention class) 或 MoBA
+    if hasattr(module, 'impl'):
+        return _unwrap_attention(module.impl)
+    return module
 
-    Returns:
-        List: 包含所有已注册钩子对象的列表，以便后续收集指标。
-    """
+
+def register_hooks(model: nn.Module) -> List:
     hooks = []
 
-    # 1. 监控 Embedding 层的梯度
+    # 1. Embedding Gradient
     if hasattr(model, 'tok_embeddings') and hasattr(model.tok_embeddings, 'weight'):
         emb_bwd_hook = BackwardHook(name="tok_embeddings", module=model.tok_embeddings)
         if model.tok_embeddings.weight.requires_grad:
             model.tok_embeddings.weight.register_hook(emb_bwd_hook)
             hooks.append(emb_bwd_hook)
 
-    # 2. 遍历所有TransformerBlock
+    # 2. Layers
     for i, block in enumerate(model.layers):
-        # --- 为Attention层注册钩子 ---
-        # 激活值钩子 (前向)
+        # --- Attention Hooks ---
+        # 1. Unpack to get the real attention implementation
+        real_attn = _unwrap_attention(block.attention)
+
+        # 2. Forward Hook (Output)
+        # 我们 hook 在 wrapper 上，这样能捕获最终输出
         attn_fwd_hook = ForwardHook(name=f"layer_{i}/attention.output")
         block.attention.register_forward_hook(attn_fwd_hook)
         hooks.append(attn_fwd_hook)
 
-        # 梯度钩子 (反向)
-        attn_bwd_hook = BackwardHook(name=f"layer_{i}/attention.wo", module=block.attention.wo)
-        block.attention.wo.weight.register_hook(attn_bwd_hook)
-        hooks.append(attn_bwd_hook)
+        # 3. Backward Hook (Projection Weights)
+        # 尝试寻找 wo (Standard, MLA, Linear 都有 wo)
+        if hasattr(real_attn, 'wo'):
+            attn_bwd_hook = BackwardHook(name=f"layer_{i}/attention.wo", module=real_attn.wo)
+            if real_attn.wo.weight.requires_grad:
+                real_attn.wo.weight.register_hook(attn_bwd_hook)
+                hooks.append(attn_bwd_hook)
 
-        # --- 为FeedForward层注册钩子 (MoE 适配逻辑) ---
-        # 激活值钩子 (前向) - 无论是 Dense 还是 MoE，输出监控逻辑一致
+        # --- FFN Hooks ---
         ffn_fwd_hook = ForwardHook(name=f"layer_{i}/feed_forward.output")
         block.feed_forward.register_forward_hook(ffn_fwd_hook)
         hooks.append(ffn_fwd_hook)
 
-        # 梯度钩子 (反向) - 需要区分 MoE 和 Dense
+        # MoE Router or Dense w_down
         if MoELayer and isinstance(block.feed_forward, MoELayer):
-            # 对于 MoE，我们监控 Router (门控网络) 的权重梯度
-            # 这能反映模型是否在学习如何分配专家
             router_bwd_hook = BackwardHook(name=f"layer_{i}/moe_router", module=block.feed_forward.router)
             if block.feed_forward.router.weight.requires_grad:
                 block.feed_forward.router.weight.register_hook(router_bwd_hook)
                 hooks.append(router_bwd_hook)
         else:
-            # 对于 Dense FFN，监控 w_down
             if hasattr(block.feed_forward, 'w_down'):
                 ffn_bwd_hook = BackwardHook(name=f"layer_{i}/feed_forward.w_down", module=block.feed_forward.w_down)
                 if block.feed_forward.w_down.weight.requires_grad:
                     block.feed_forward.w_down.weight.register_hook(ffn_bwd_hook)
                     hooks.append(ffn_bwd_hook)
 
-        # --- 监控 Normalization 层的激活值和梯度 ---
-        # 3a. Attention Norm
+        # --- Norm Hooks ---
+        # Attention Norm
         attn_norm_fwd_hook = ForwardHook(name=f"layer_{i}/attention_norm")
         block.attention_norm.register_forward_hook(attn_norm_fwd_hook)
         hooks.append(attn_norm_fwd_hook)
 
         attn_norm_bwd_hook = BackwardHook(name=f"layer_{i}/attention_norm.weight", module=block.attention_norm)
-        if block.attention_norm.weight.requires_grad:
+        if hasattr(block.attention_norm, 'weight') and block.attention_norm.weight.requires_grad:
             block.attention_norm.weight.register_hook(attn_norm_bwd_hook)
             hooks.append(attn_norm_bwd_hook)
 
-        # 3b. FFN Norm
+        # FFN Norm
         ffn_norm_fwd_hook = ForwardHook(name=f"layer_{i}/ffn_norm")
         block.ffn_norm.register_forward_hook(ffn_norm_fwd_hook)
         hooks.append(ffn_norm_fwd_hook)
 
         ffn_norm_bwd_hook = BackwardHook(name=f"layer_{i}/ffn_norm.weight", module=block.ffn_norm)
-        if block.ffn_norm.weight.requires_grad:
+        if hasattr(block.ffn_norm, 'weight') and block.ffn_norm.weight.requires_grad:
             block.ffn_norm.weight.register_hook(ffn_norm_bwd_hook)
             hooks.append(ffn_norm_bwd_hook)
 
-    # 3. 监控最终的 Normalization 层
+    # 3. Final Norm
     if hasattr(model, 'norm'):
         final_norm_fwd_hook = ForwardHook(name="final_norm")
         model.norm.register_forward_hook(final_norm_fwd_hook)
         hooks.append(final_norm_fwd_hook)
 
         final_norm_bwd_hook = BackwardHook(name="final_norm.weight", module=model.norm)
-        if model.norm.weight.requires_grad:
+        if hasattr(model.norm, 'weight') and model.norm.weight.requires_grad:
             model.norm.weight.register_hook(final_norm_bwd_hook)
             hooks.append(final_norm_bwd_hook)
 
-    # 4. 监控最终 LM Head 的梯度
+    # 4. LM Head
     if hasattr(model, 'lm_head') and hasattr(model.lm_head, 'weight'):
         lm_head_bwd_hook = BackwardHook(name="lm_head", module=model.lm_head)
         if model.lm_head.weight.requires_grad:

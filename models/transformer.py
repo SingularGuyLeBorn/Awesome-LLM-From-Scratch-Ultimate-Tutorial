@@ -1,8 +1,8 @@
 # FILE: models/transformer.py
 """
-【v3.0 - MoE 集成版】
-- 在 TransformerBlock 中集成 MoE 逻辑。
-- 根据 `moe_layers_indices` 动态选择实例化 Dense FFN 还是 MoE Layer。
+【v3.3 - RoPE 维度修复版】
+- [核心修复] 修复 MLA 模式下 RoPE 初始化维度错误的问题。
+  MLA 的 RoPE 只作用于 rope_head_dim (例如16)，而不是完整的 head_dim (例如32)。
 """
 import sys
 import os
@@ -20,9 +20,9 @@ import logging
 from torch.utils.checkpoint import checkpoint
 
 from models.config import ModelArgs
-from models.blocks.attention.attention import Attention, AttentionConfig
+from models.blocks.attention.attention import Attention
 from models.blocks.feedforward.feedforward import FeedForward
-from models.blocks.feedforward.moe import MoELayer  # [新增]
+from models.blocks.feedforward.moe import MoELayer
 from models.blocks.normalization.normalization import RMSNorm
 from models.blocks.positional_encoding.positional_encoding import RoPE, RoPEConfig
 from inference.engine.kv_cache import KVCache
@@ -31,25 +31,14 @@ from inference.engine.kv_cache import KVCache
 class TransformerBlock(nn.Module):
     def __init__(self, args: ModelArgs, layer_id: int):
         super().__init__()
-        attention_args = AttentionConfig(
-            dim=args.dim,
-            n_heads=args.n_heads,
-            n_kv_heads=args.n_kv_heads,
-            dropout=args.dropout,
-            max_seq_len=args.max_seq_len,
-            is_causal=True
-        )
-        self.attention = Attention(attention_args)
+        self.attention = Attention(args)
 
-        # [MoE 逻辑判断]
-        # 1. 如果 num_experts > 1
-        # 2. 且 moe_layers_indices 为空 (默认全MoE) 或者 layer_id 在列表中
+        # MoE Logic
         is_moe_layer = (args.num_experts > 1) and (
                 args.moe_layers_indices is None or layer_id in args.moe_layers_indices
         )
 
         if is_moe_layer:
-            logging.debug(f"Layer {layer_id}: Initializing as MoE Layer (Experts: {args.num_experts})")
             self.feed_forward = MoELayer(
                 dim=args.dim,
                 hidden_dim=args.ffn_hidden_dim,
@@ -58,7 +47,6 @@ class TransformerBlock(nn.Module):
                 multiple_of=args.multiple_of
             )
         else:
-            # logging.debug(f"Layer {layer_id}: Initializing as Dense FFN")
             self.feed_forward = FeedForward(
                 dim=args.dim,
                 hidden_dim=args.ffn_hidden_dim,
@@ -71,7 +59,6 @@ class TransformerBlock(nn.Module):
 
     def _forward_impl(self, x: torch.Tensor, rope: RoPE, layer_idx: int, kv_cache: Optional[KVCache] = None,
                       start_pos: int = 0, paged_attention_inputs: Optional[Tuple] = None) -> torch.Tensor:
-        """实际的前向传播逻辑"""
         attn_input = self.attention_norm(x)
         h = x + self.attention(
             attn_input, rope, layer_idx, kv_cache, start_pos, paged_attention_inputs=paged_attention_inputs
@@ -82,10 +69,9 @@ class TransformerBlock(nn.Module):
     def forward(self, x: torch.Tensor, rope: RoPE, layer_idx: int, kv_cache: Optional[KVCache] = None,
                 start_pos: int = 0, paged_attention_inputs: Optional[Tuple] = None) -> torch.Tensor:
         if self.use_checkpointing:
-            # Paged attention is for inference, checkpointing for training.
             return checkpoint(
-                lambda *inputs: self._forward_impl(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]),
-                x, rope, layer_idx, kv_cache, start_pos,
+                lambda *inputs: self._forward_impl(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5]),
+                x, rope, layer_idx, kv_cache, start_pos, paged_attention_inputs,
                 use_reentrant=False
             )
         else:
@@ -99,13 +85,20 @@ class Transformer(nn.Module):
         self.args = args
 
         self.tok_embeddings = nn.Embedding(args.vocab_size, args.dim)
-        # [修改] 传递 layer_id 以支持 MoE 混合层配置
         self.layers = nn.ModuleList([TransformerBlock(args, layer_id=i) for i in range(args.n_layers)])
         self.norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.lm_head = nn.Linear(args.dim, args.vocab_size, bias=False)
 
+        # [核心修复] 动态计算 RoPE 的维度
+        # 如果是 MLA，RoPE 只作用于 decoupling 后的 PE 部分 (例如 16 维)
+        # 否则 (MHA/GQA)，RoPE 作用于整个 head_dim (例如 128 维)
+        if args.attention_variant == "mla":
+            rope_dim = args.rope_head_dim
+        else:
+            rope_dim = args.dim // args.n_heads
+
         rope_config = RoPEConfig(
-            head_dim=args.dim // args.n_heads,
+            head_dim=rope_dim,
             max_seq_len=args.max_seq_len,
             base=args.rope_base
         )
@@ -116,19 +109,14 @@ class Transformer(nn.Module):
         self.apply(self._init_weights)
 
         if args.use_activation_checkpointing:
-            logging.info("模型已配置为在训练和验证期间使用梯度检查点 (Activation Checkpointing)。")
-        else:
-            logging.info("梯度检查点未启用。")
-
+            logging.info("Gradient Checkpointing: ENABLED")
         if args.num_experts > 1:
-            logging.info(f"MoE 已启用: Total Experts={args.num_experts}, TopK={args.num_experts_per_tok}")
+            logging.info(f"MoE Architecture: ENABLED ({args.num_experts} experts, top-{args.num_experts_per_tok})")
+        logging.info(f"Attention Mechanism: {args.attention_variant.upper()} (RoPE dim: {rope_dim})")
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            # 注意：MoE 的专家层也包含 Linear，这里会统一初始化
-            # 如果是 Dense FFN 或 Attention output，通常需要特殊缩放
-            # 但对于基础实现，统一初始化通常足够
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
@@ -146,7 +134,7 @@ class Transformer(nn.Module):
         is_paged = paged_attention_inputs is not None
         if not is_paged:
             bs, seq_len = tokens.shape
-            assert seq_len <= self.args.max_seq_len, "输入序列长度超过模型最大长度限制"
+            assert seq_len <= self.args.max_seq_len, f"Input sequence length ({seq_len}) exceeds limit ({self.args.max_seq_len})."
 
         h = self.tok_embeddings(tokens)
 
