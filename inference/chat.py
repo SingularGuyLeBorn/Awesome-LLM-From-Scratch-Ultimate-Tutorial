@@ -1,8 +1,8 @@
 # FILE: inference/chat.py
 # -*- coding: utf-8 -*-
 """
-[v1.6 - 输出净化] 交互式命令行聊天脚本。
-- 增加输出净化逻辑，将模型生成的换行符替换为空格，以保证终端单行打字机效果。
+[v1.7 - 集成量化] 交互式命令行聊天脚本。
+- 新增 `--quantize` 参数，支持 Int8 动态量化加速 CPU 推理。
 """
 import torch
 import argparse
@@ -18,6 +18,7 @@ if project_root not in sys.path:
 from utils.config_loader import load_config
 from utils.builders import build_model
 from inference.generate import generate_stream
+from inference.quantization import Quantizer
 from tokenizers import Tokenizer
 
 
@@ -28,6 +29,7 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.7, help="生成时的温度参数。")
     parser.add_argument("--top_p", type=float, default=0.9, help="生成时的top-p (nucleus) 采样参数。")
     parser.add_argument("--max_new_tokens", type=int, default=256, help="一次生成的最大token数。")
+    parser.add_argument("--quantize", action="store_true", help="[New] 是否对模型进行 Int8 动态量化以加速 CPU 推理。")
     args = parser.parse_args()
 
     # --- 1. 加载模型和分词器 ---
@@ -42,13 +44,21 @@ def main():
     tokenizer_path = cfg.data.tokenizer_name
 
     model.eval()
-    device = 'cpu'
+    device = 'cpu' # 动态量化目前主要在 CPU 上有效
     model.to(device)
-    try:
-        model = model.to(torch.bfloat16)
-        print("   -> 模型已转换为 bfloat16 以加速推理。")
-    except Exception:
-        print("   -> CPU 不支持 bfloat16，将使用 float32。")
+
+    # 量化处理逻辑
+    if args.quantize:
+        print("\n⚖️ 正在应用 Int8 动态量化 (Dynamic Quantization)...")
+        print("   这会显著降低内存占用并加速 CPU 推理，但可能会带来微小的精度损失。")
+        model = Quantizer.quantize_dynamic(model)
+        print("✅ 模型已量化。")
+    else:
+        try:
+            model = model.to(torch.bfloat16)
+            print("   -> 模型已转换为 bfloat16 以加速推理。")
+        except Exception:
+            print("   -> CPU 不支持 bfloat16，将使用 float32。")
 
     tokenizer = Tokenizer.from_file(tokenizer_path)
     im_start_id = tokenizer.token_to_id("<|im_start|>")
@@ -103,9 +113,7 @@ def main():
 
                 newly_generated_part = new_text[len(generated_text):]
 
-                # [核心修复] 净化输出以获得干净的单行打字机效果
-                # 模型可能会生成 \n, \r 等字符，直接打印会导致终端显示混乱。
-                # 我们将其替换为空格，确保光标始终在同一行。
+                # 净化输出以获得干净的单行打字机效果
                 sanitized_part = newly_generated_part.replace('\n', ' ').replace('\r', '')
 
                 print(sanitized_part, end="", flush=True)
@@ -118,14 +126,11 @@ def main():
             num_tokens = len(response_tokens)
             tokens_per_sec = num_tokens / duration if duration > 0 else float('inf')
 
-            # 最终的完整回答也需要被净化，以便在历史记录中保持整洁
             final_response = generated_text.replace('\n', ' ').replace('\r', ' ').strip()
 
-            # 由于我们是增量打印，最后需要打印一个换行符来结束这一行
             print()
             print(f"   (生成 {num_tokens} tokens, 耗时 {duration:.2f}s, 速度: {tokens_per_sec:.2f} tok/s)")
 
-            # 更新历史
             history.append((prompt_text, final_response))
 
         except KeyboardInterrupt:

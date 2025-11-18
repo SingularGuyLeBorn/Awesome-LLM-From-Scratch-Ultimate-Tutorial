@@ -44,7 +44,7 @@
 *   **数据工程**: 全自动化的数据流水线，涵盖下载、多进程预处理、高效Token化及二进制文件构建 (`Packed Sequences`)。
 *   **从零预训练 (Pre-training)**: 搭建准工业级训练框架，支持混合精度、动态梯度裁剪、多后端日志（WandB/SwanLab）和断点续训，在CPU上即可完整运行。
 *   **对齐微调 (Alignment)**: 实现从监督微调（SFT）、奖励模型（RM）训练，到高级强化学习对齐（DPO, PPO, GRPO/GSPO）的全套方案。
-*   **高效推理 (Inference)**: 手写实现KV缓存，将模型推理速度提升百倍，并提供交互式聊天脚本，让你能真实地与自己训练的模型对话。
+*   **高效推理 (Inference)**: 手写实现KV缓存与 **PagedAttention**，模拟 vLLM 的内存管理机制，并提供 OpenAI 兼容的 API Server。
 
 #### 2. 🔧 **“准工业级”代码实现 (Quasi-Industrial Grade)**
 
@@ -89,8 +89,9 @@
     ```
 4.  **与你的模型聊天!**:
     ```bash
-    # 训练完成后，找到你的最佳检查点路径 (e.g., in runs/sft/...)
-    python inference/chat.py --checkpoint_path [你的最佳模型ckpt路径]
+    # 训练完成后，找到你的最佳检查点路径
+    # 加上 --quantize 参数以在 CPU 上使用 int8 量化加速
+    python inference/chat.py --checkpoint_path [你的最佳模型ckpt路径] --quantize
     ```
 
 ---
@@ -136,14 +137,9 @@
         -   [ ]  Sliding Window (Longformer)
         -   [ ]  NSA (Native Sparse Attention)
         -   [ ]  DSA (DeepSeek Sparse Attention)
-        -   [ ]  MoBA (Mixture of Block Attention - Kimi)
-        -   [ ]  KDA (Kimi Delta Attention)
     -   [ ]  **线性/次线性注意力**:
         -   [ ]  FLASH
-        -   [ ]  Performer
-        -   [ ]  1-Liner Attention
-        -   [ ]  Lightning Attention (MiniMax)
-        -   [ ]  Logic Attention
+        -   [ ]  Lightning Attention
     -   [ ]  **压缩KV**: MLA (Multi-head Latent Attention - DeepSeek)
 -   **前馈网络 (FFN)**:
     -   [X]  **GLU变体**: SwiGLU
@@ -153,83 +149,53 @@
     -   [ ]  GELU
 -   **位置编码 (Positional Encoding)**:
     -   [X]  **绝对位置编码**: Learned, Sinusoidal
-    -   [X]  **相对位置编码**: RoPE, ALiBi (以辅助函数形式实现)
-    -   [ ]  **长度外推**: YaRN, PI
+    -   [X]  **相对位置编码**: RoPE (含 Paged 支持), ALiBi
+    -   [ ]  **长度外推**: YaRN
 -   **归一化层 (Normalization)**:
-    -   [X]  **LayerNorm** (Pre-LN架构中)
+    -   [X]  **LayerNorm**
     -   [X]  **RMSNorm**
-    -   [X]  **BatchNorm** (用于教学对比)
     -   [X]  **Qwen2RMSNorm** (`1+w` 技巧)
 -   **残差连接**:
     -   [X]  **Pre-LN** 架构
 
 ### **四、训练流程**
 
--   [X]  **权重初始化**:
-    -   [X]  GPT-2风格标准初始化
-    -   [ ]  Kaiming/Xavier
-
+-   [X]  **权重初始化**: GPT-2风格标准初始化
 -   **预训练 (Pre-training)**:
     -   [X]  **训练目标**: CLM (Causal Language Modeling)
-    -   [X]  **超参数配置**: 通过 `config.yaml` 统一管理
-    -   [X]  **优化器**:
-        -   [ ]  发展历程: 最小二乘法 -> BGD -> **SGD**
-        -   [X]  **AdamW** (带权重衰减分离)
-        -   [ ]  **Muon**
-        -   [ ]  Adafactor, Lion
-    -   [X]  **混合精度训练**:
-        -   [X]  CPU `bfloat16`
-        -   [X]  GPU `float16` (已支持`GradScaler`)
-    -   [ ]  **分布式训练**: DDP, FSDP, DeepSpeed ZeRO
--   **训练优化技术**:
-    -   [ ]  **Flash Attention**
-    -   [X]  **Packed Sequences**
+    -   [X]  **优化器**: AdamW
+    -   [X]  **混合精度训练**: CPU `bfloat16`, GPU `float16` (`GradScaler`)
+    -   [X]  **分布式训练**: DDP (Distributed Data Parallel)
 -   **Checkpoint管理**:
     -   [X]  **完整状态保存**: 模型, 优化器, 调度器, `GradScaler`
-    -   [X]  **断点续训** (latest/best)
-    -   [X]  最佳模型保存
+    -   [X]  **断点续训**
 
 ### **五、后训练 (Post-training)**
 
--   [X]  **监督微调 (SFT)**:
-    -   [X]  SFT数据准备与训练脚本 (`sft_train.py`)
-    -   [X]  **PEFT技术**:
-        -   [X]  LoRA
-        -   [ ]  QLoRA
-        -   [ ]  **进阶变体**: AdaLoRA, DoRA, PiSSA
+-   [X]  **监督微调 (SFT)**: 全量微调, LoRA
 -   [X]  **强化学习对齐**:
-    -   [X]  **奖励模型 (RM)** 训练 (`rm_train.py`)
-    -   [X]  **RL算法**:
-        -   [ ]  **经典**: PPO, TRPO
-        -   [X]  **离线/简化**: DPO, ORPO, IPO, KTO
-        -   [X]  **进阶**: GRPO, GSPO, GMPO, DAPO, BAPO
+    -   [X]  **奖励模型 (RM)**
+    -   [X]  **RL算法**: PPO, DPO, ORPO, GRPO, GSPO
 
 ### **六、模型评估**
 
 -   **自动评估指标**:
     -   [X]  **困惑度 (Perplexity)**
-    -   [ ]  **生成质量**: BLEU, ROUGE
-    -   [ ]  **代码能力**: pass@k
--   **Benchmark评估**:
-    -   [ ]  **通用能力**: MMLU, C-Eval
-    -   [ ]  **推理能力**: GSM8K, MATH
-    -   [ ]  **代码能力**: HumanEval, MBPP
-    -   [ ]  **长文本能力**: LongBench, Needle In A Haystack
+    -   [ ]  **Benchmark评估**: MMLU, GSM8K (计划中)
 -   **训练过程监控**:
-    -   [X]  **基础指标**: Loss, Learning Rate
-    -   [X]  **内部指标 (遥测)**: 通过Hooks监控激活值范数, 梯度范数
+    -   [X]  **基础指标**: Loss, LR
+    -   [X]  **内部指标 (遥测)**: 激活值范数, 梯度范数
 
 ### **七、模型部署与推理优化**
 
--   [X]  **采样策略**:
-    -   [X]  Greedy, Top-K, Top-P, Temperature (`generate.py`)
+-   [X]  **采样策略**: Greedy, Top-K, Top-P, Temperature
 -   [X]  **推理加速**:
-    -   [X]  **KV Cache** (`kv_cache.py`)
-    -   [ ]  Speculative Decoding
--   [ ]  **模型压缩**:
-    -   [ ]  **量化**: GPTQ, AWQ (`quantization.py` 为占位符)
-    -   [ ]  **剪枝**: 结构化与非结构化 (`pruning.py` 为占位符)
-    -   [ ]  **知识蒸馏**
+    -   [X]  **KV Cache**
+    -   [X]  **PagedAttention** (Mini-vLLM 实现)
+-   [X]  **服务化**: OpenAI 兼容 API Server
+-   [X]  **模型压缩**:
+    -   [X]  **量化**: 动态 Int8 量化 (CPU Friendly)
+    -   [ ]  **剪枝**
 
 ## ❤️ 欢迎贡献
 
@@ -244,4 +210,3 @@
   <br>
   <samp>Chasing the wind and the moon, we shall not stay; where the plains end, the verdant mountains of spring await.</samp>
 </div>
-# END OF FILE: README.md

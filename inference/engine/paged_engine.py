@@ -1,26 +1,38 @@
 # FILE: inference/engine/paged_engine.py
 # -*- coding: utf-8 -*-
 """
-[v2.1 - Cleaned Version]
-
-- 移除了所有调试用的 print 语句。
+[v2.2 - 量化支持] PagedAttention 推理引擎。
+- 新增 `quantize` 参数。
 """
 import torch
 from typing import List, Dict, Tuple
+import logging
 
 from tokenizers import Tokenizer
 from models.transformer import Transformer
 from inference.strategies.sampling import sample
+from inference.quantization import Quantizer
 from .scheduler import Scheduler, Sequence
 from .block_manager import BlockManager
 
 
 class PagedInferenceEngine:
-    def __init__(self, model: Transformer, tokenizer: Tokenizer, block_size: int, num_blocks: int):
+    def __init__(self, model: Transformer, tokenizer: Tokenizer, block_size: int, num_blocks: int,
+                 quantize: bool = False):
         self.model = model.eval()
         self.tokenizer = tokenizer
         self.device = next(model.parameters()).device
         self.dtype = next(model.parameters()).dtype
+
+        if quantize:
+            logging.info("PagedInferenceEngine: 正在应用动态量化...")
+            if self.device.type != 'cpu':
+                logging.warning("PagedInferenceEngine: 动态量化建议在 CPU 上使用。")
+                self.model.to('cpu')
+                self.device = torch.device('cpu')
+
+            self.model = Quantizer.quantize_dynamic(self.model)
+            logging.info("PagedInferenceEngine: 模型已量化。")
 
         self.block_size = block_size
         self.block_manager = BlockManager(

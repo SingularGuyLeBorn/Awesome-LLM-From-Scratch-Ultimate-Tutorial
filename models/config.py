@@ -1,10 +1,10 @@
 # FILE: models/config.py
 """
-[v2.1 - 新增梯度检查点开关]
-- ModelArgs 现在包含 use_activation_checkpointing 标志。
+[v2.2 - MoE 支持]
+- ModelArgs 新增 MoE 相关参数。
 """
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, List, Optional
 
 
 @dataclass
@@ -26,37 +26,38 @@ class ModelArgs:
     # RoPE 相关
     rope_base: int = 10000
 
-    # Dropout (通常只在训练时使用)
+    # Dropout
     dropout: float = 0.0
 
     # 最大序列长度
     max_seq_len: int = 2048
 
-    # [核心新增] 是否在训练时使用梯度检查点以节省内存
+    # 训练优化
     use_activation_checkpointing: bool = False
+
+    # [MoE 核心配置]
+    num_experts: int = 0  # 专家总数。如果为 0 或 1，则使用标准 FFN
+    num_experts_per_tok: int = 2  # 每个 token 选择的专家数 (Top-K)
+
+    # [MoE 混合配置]
+    # 允许指定哪些层使用 MoE，哪些层使用 Dense。
+    # 这是一个 indices 列表，例如 [2, 4, 6, 8...]
+    # 如果为 None 且 num_experts > 1，则默认所有层都使用 MoE
+    moe_layers_indices: Optional[List[int]] = None
 
     # 允许 dataclass 接受并忽略未在字段中定义的额外参数
     def __init__(self, **kwargs):
-        # 获取所有已定义的字段名
         defined_fields = {f.name for f in self.__dataclass_fields__.values()}
-
-        # 为所有已定义的字段设置属性
         for field_name in defined_fields:
-            # 如果kwargs中提供了值，则使用它，否则使用默认值
             value = kwargs.get(field_name, getattr(self, field_name))
             setattr(self, field_name, value)
-
-        # 调用 __post_init__ （如果存在）
         if hasattr(self, '__post_init__'):
             self.__post_init__()
 
     def __post_init__(self):
-        """在对象初始化后自动调用的方法。"""
-        # 如果 vocab_size 未设置, 抛出错误
         if self.vocab_size == -1:
             raise ValueError("vocab_size must be set.")
 
-        # 如果 ffn_hidden_dim 未指定，则根据 SwiGLU 规则计算
         if self.ffn_hidden_dim is None:
             hidden_dim = 4 * self.dim
             hidden_dim = int(2 * hidden_dim / 3)

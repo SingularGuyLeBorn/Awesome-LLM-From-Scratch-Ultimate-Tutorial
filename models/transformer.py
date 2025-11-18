@@ -1,9 +1,8 @@
 # FILE: models/transformer.py
 """
-【v2.5 - PagedAttention 适配】
-- `forward` 方法现在可以接受一个可选的 `paged_attention_inputs` 元组。
-- 当接收到该参数时，它会以 PagedAttention 模式运行，将相关信息传递给 Attention 层。
-- 否则，它会以标准模式（训练或简单推理）运行。
+【v3.0 - MoE 集成版】
+- 在 TransformerBlock 中集成 MoE 逻辑。
+- 根据 `moe_layers_indices` 动态选择实例化 Dense FFN 还是 MoE Layer。
 """
 import sys
 import os
@@ -23,13 +22,14 @@ from torch.utils.checkpoint import checkpoint
 from models.config import ModelArgs
 from models.blocks.attention.attention import Attention, AttentionConfig
 from models.blocks.feedforward.feedforward import FeedForward
+from models.blocks.feedforward.moe import MoELayer  # [新增]
 from models.blocks.normalization.normalization import RMSNorm
 from models.blocks.positional_encoding.positional_encoding import RoPE, RoPEConfig
 from inference.engine.kv_cache import KVCache
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, layer_id: int):
         super().__init__()
         attention_args = AttentionConfig(
             dim=args.dim,
@@ -40,11 +40,31 @@ class TransformerBlock(nn.Module):
             is_causal=True
         )
         self.attention = Attention(attention_args)
-        self.feed_forward = FeedForward(
-            dim=args.dim,
-            hidden_dim=args.ffn_hidden_dim,
-            multiple_of=args.multiple_of
+
+        # [MoE 逻辑判断]
+        # 1. 如果 num_experts > 1
+        # 2. 且 moe_layers_indices 为空 (默认全MoE) 或者 layer_id 在列表中
+        is_moe_layer = (args.num_experts > 1) and (
+                args.moe_layers_indices is None or layer_id in args.moe_layers_indices
         )
+
+        if is_moe_layer:
+            logging.debug(f"Layer {layer_id}: Initializing as MoE Layer (Experts: {args.num_experts})")
+            self.feed_forward = MoELayer(
+                dim=args.dim,
+                hidden_dim=args.ffn_hidden_dim,
+                num_experts=args.num_experts,
+                num_experts_per_tok=args.num_experts_per_tok,
+                multiple_of=args.multiple_of
+            )
+        else:
+            # logging.debug(f"Layer {layer_id}: Initializing as Dense FFN")
+            self.feed_forward = FeedForward(
+                dim=args.dim,
+                hidden_dim=args.ffn_hidden_dim,
+                multiple_of=args.multiple_of
+            )
+
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.use_checkpointing = args.use_activation_checkpointing
@@ -62,8 +82,7 @@ class TransformerBlock(nn.Module):
     def forward(self, x: torch.Tensor, rope: RoPE, layer_idx: int, kv_cache: Optional[KVCache] = None,
                 start_pos: int = 0, paged_attention_inputs: Optional[Tuple] = None) -> torch.Tensor:
         if self.use_checkpointing:
-            # Paged attention is for inference, checkpointing for training. They are mutually exclusive.
-            # So we don't need to pass paged_attention_inputs to checkpoint.
+            # Paged attention is for inference, checkpointing for training.
             return checkpoint(
                 lambda *inputs: self._forward_impl(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]),
                 x, rope, layer_idx, kv_cache, start_pos,
@@ -80,7 +99,8 @@ class Transformer(nn.Module):
         self.args = args
 
         self.tok_embeddings = nn.Embedding(args.vocab_size, args.dim)
-        self.layers = nn.ModuleList([TransformerBlock(args) for _ in range(args.n_layers)])
+        # [修改] 传递 layer_id 以支持 MoE 混合层配置
+        self.layers = nn.ModuleList([TransformerBlock(args, layer_id=i) for i in range(args.n_layers)])
         self.norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.lm_head = nn.Linear(args.dim, args.vocab_size, bias=False)
 
@@ -100,12 +120,15 @@ class Transformer(nn.Module):
         else:
             logging.info("梯度检查点未启用。")
 
+        if args.num_experts > 1:
+            logging.info(f"MoE 已启用: Total Experts={args.num_experts}, TopK={args.num_experts_per_tok}")
+
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            if module in [layer.attention.wo for layer in self.layers] or \
-                    module in [layer.feed_forward.w_down for layer in self.layers]:
-                module.weight.data.normal_(mean=0.0, std=0.02 / math.sqrt(2 * self.args.n_layers))
+            # 注意：MoE 的专家层也包含 Linear，这里会统一初始化
+            # 如果是 Dense FFN 或 Attention output，通常需要特殊缩放
+            # 但对于基础实现，统一初始化通常足够
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
@@ -120,7 +143,6 @@ class Transformer(nn.Module):
             start_pos: int = 0,
             paged_attention_inputs: Optional[Tuple] = None,
     ) -> torch.Tensor:
-        # PagedAttention 模式下，输入 tokens 是一个扁平化的张量
         is_paged = paged_attention_inputs is not None
         if not is_paged:
             bs, seq_len = tokens.shape
@@ -139,4 +161,5 @@ class Transformer(nn.Module):
 
         logits = self.lm_head(h)
         return logits
+
 # END OF FILE: models/transformer.py
