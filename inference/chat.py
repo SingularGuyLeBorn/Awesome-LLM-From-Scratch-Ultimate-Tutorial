@@ -1,8 +1,8 @@
 # FILE: inference/chat.py
 # -*- coding: utf-8 -*-
 """
-[v1.3 - 路径修复版] 交互式命令行聊天脚本。
-- 修复了加载配置文件时，相对路径解析错误的问题。
+[v1.6 - 输出净化] 交互式命令行聊天脚本。
+- 增加输出净化逻辑，将模型生成的换行符替换为空格，以保证终端单行打字机效果。
 """
 import torch
 import argparse
@@ -34,7 +34,6 @@ def main():
     print("🚀 正在加载模型和分词器...")
     checkpoint = torch.load(args.checkpoint_path, map_location='cpu')
 
-    # [核心修复] 使用项目根目录作为基础路径来加载配置
     project_base_path = Path(__file__).parent.parent.resolve()
     cfg = load_config(args.config_path, project_base_path)
 
@@ -94,12 +93,24 @@ def main():
                 eos_id=eos_id
             )
 
+            generated_text = ""
             for token_id in token_stream:
                 if token_id in [im_end_id, im_start_id, eos_id]:
                     break
+
                 response_tokens.append(token_id)
-                decoded_text = tokenizer.decode(response_tokens)
-                print("\r" + "🤖 > " + decoded_text, end="", flush=True)
+                new_text = tokenizer.decode(response_tokens)
+
+                newly_generated_part = new_text[len(generated_text):]
+
+                # [核心修复] 净化输出以获得干净的单行打字机效果
+                # 模型可能会生成 \n, \r 等字符，直接打印会导致终端显示混乱。
+                # 我们将其替换为空格，确保光标始终在同一行。
+                sanitized_part = newly_generated_part.replace('\n', ' ').replace('\r', '')
+
+                print(sanitized_part, end="", flush=True)
+
+                generated_text = new_text
 
             # --- 4. 结束与统计 ---
             end_time = time.perf_counter()
@@ -107,9 +118,12 @@ def main():
             num_tokens = len(response_tokens)
             tokens_per_sec = num_tokens / duration if duration > 0 else float('inf')
 
-            final_response = tokenizer.decode(response_tokens).strip()
-            print("\r" + "🤖 > " + final_response, flush=True)
-            print(f"\n   (生成 {num_tokens} tokens, 耗时 {duration:.2f}s, 速度: {tokens_per_sec:.2f} tok/s)")
+            # 最终的完整回答也需要被净化，以便在历史记录中保持整洁
+            final_response = generated_text.replace('\n', ' ').replace('\r', ' ').strip()
+
+            # 由于我们是增量打印，最后需要打印一个换行符来结束这一行
+            print()
+            print(f"   (生成 {num_tokens} tokens, 耗时 {duration:.2f}s, 速度: {tokens_per_sec:.2f} tok/s)")
 
             # 更新历史
             history.append((prompt_text, final_response))

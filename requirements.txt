@@ -1,38 +1,59 @@
+# FILE: requirements.txt
+# ===================================================================
+# LLM-From-Scratch-Ultimate-Tutorial 项目依赖文件
+#
+# 所有版本均已固定 (==)，以保证环境的可复现性。
+# 使用 `uv pip install -r requirements.txt` 命令进行安装。
+# ===================================================================
+
 # ----------------------------------
-# V2/V3 核心手写版 & 底层版 依赖
+# 核心依赖 (Core Dependencies)
 # ----------------------------------
-# 核心计算库 (指定CPU版本以保证在无GPU环境下的兼容性)
+# 核心计算库
 torch==2.3.1
 numpy==1.26.4
 
-# 配置文件解析
+# 配置文件与命令行
 pyyaml==6.0.1
 
-# 数据处理
-pandas==2.2.2
-
-# 进度条
+# 进度条与系统监控
 tqdm==4.66.4
+psutil==5.9.8
 
-wandb==0.17.0
-swanlab==0.2.6
+# API 服务 (Inference Engine)
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+pydantic==2.7.1
+aiohttp==3.9.5
 
-
-# 高性能正则表达式库 (用于分词器)
-regex==2025.11.3
 # ----------------------------------
-# V1 快速原型版 依赖 (可选安装)
+# 数据处理与分词 (Data Pipeline & Tokenization)
 # ----------------------------------
-# Hugging Face 生态
-transformers==4.41.2
+# Hugging Face 数据集库
 datasets==2.19.2
+pyarrow==16.1.0
+
+# 高性能分词器训练库
 tokenizers==0.19.1
-accelerate==0.30.1
-peft==0.11.1
-trl==0.9.4
+
+# 高性能正则表达式库 (用于手写分词器)
+regex==2023.12.25
 
 # ----------------------------------
-# 日志与监控 (推荐安装)
+# 日志与监控 (Logging & Monitoring)
 # ----------------------------------
 wandb==0.17.0
+swanlab==0.7.1
 tensorboard==2.16.2
+
+# ----------------------------------
+# (可选) Hugging Face 高级库 (Optional Advanced HF Libraries)
+#
+# 注意：本项目核心代码不依赖这些库。
+# 它们主要用于功能对比、数据验证或未来可能的扩展。
+# ----------------------------------
+# transformers==4.41.2
+# accelerate==0.30.1
+# peft==0.11.1
+# trl==0.9.4
+# END OF FILE: requirements.txt

@@ -1,0 +1,9 @@
+{
+  "model": "llm-from-scratch",
+  "messages": [
+    {
+      "role": "user",
+      "content": "how are you?"
+    }
+  ]
+}

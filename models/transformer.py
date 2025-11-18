@@ -1,12 +1,14 @@
 # FILE: models/transformer.py
 """
-【v2.4 - DDP 验证死锁终极修复】
-- 移除梯度检查点中的 `and self.training` 条件，使其在验证阶段也能生效，避免内存暴增导致的假死。
+【v2.5 - PagedAttention 适配】
+- `forward` 方法现在可以接受一个可选的 `paged_attention_inputs` 元组。
+- 当接收到该参数时，它会以 PagedAttention 模式运行，将相关信息传递给 Attention 层。
+- 否则，它会以标准模式（训练或简单推理）运行。
 """
 import sys
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 project_root = str(Path(os.path.dirname(__file__)).parent)
 if project_root not in sys.path:
@@ -23,7 +25,7 @@ from models.blocks.attention.attention import Attention, AttentionConfig
 from models.blocks.feedforward.feedforward import FeedForward
 from models.blocks.normalization.normalization import RMSNorm
 from models.blocks.positional_encoding.positional_encoding import RoPE, RoPEConfig
-from inference.kv_cache import KVCache
+from inference.engine.kv_cache import KVCache
 
 
 class TransformerBlock(nn.Module):
@@ -48,30 +50,27 @@ class TransformerBlock(nn.Module):
         self.use_checkpointing = args.use_activation_checkpointing
 
     def _forward_impl(self, x: torch.Tensor, rope: RoPE, layer_idx: int, kv_cache: Optional[KVCache] = None,
-                      start_pos: int = 0) -> torch.Tensor:
+                      start_pos: int = 0, paged_attention_inputs: Optional[Tuple] = None) -> torch.Tensor:
         """实际的前向传播逻辑"""
-        h = x + self.attention(self.attention_norm(x), rope, layer_idx, kv_cache, start_pos)
+        attn_input = self.attention_norm(x)
+        h = x + self.attention(
+            attn_input, rope, layer_idx, kv_cache, start_pos, paged_attention_inputs=paged_attention_inputs
+        )
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
     def forward(self, x: torch.Tensor, rope: RoPE, layer_idx: int, kv_cache: Optional[KVCache] = None,
-                start_pos: int = 0) -> torch.Tensor:
-        """
-        前向传播，根据配置决定是否使用梯度检查点。
-        """
-        # [核心修改] 移除了 `and self.training`
-        # 在内存受限的环境中（比如我们的CPU项目），在验证阶段也启用梯度检查点是必要的。
-        # 虽然这会带来不必要的重计算开销（因为验证不需要反向传播），但它能防止
-        # 因为关闭检查点导致的激活值内存暴增，从而避免进程因使用虚拟内存而“假死”。
-        # 我们的首要目标是“能跑完”，其次才是“跑得快”。
+                start_pos: int = 0, paged_attention_inputs: Optional[Tuple] = None) -> torch.Tensor:
         if self.use_checkpointing:
+            # Paged attention is for inference, checkpointing for training. They are mutually exclusive.
+            # So we don't need to pass paged_attention_inputs to checkpoint.
             return checkpoint(
                 lambda *inputs: self._forward_impl(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]),
                 x, rope, layer_idx, kv_cache, start_pos,
                 use_reentrant=False
             )
         else:
-            return self._forward_impl(x, rope, layer_idx, kv_cache, start_pos)
+            return self._forward_impl(x, rope, layer_idx, kv_cache, start_pos, paged_attention_inputs)
 
 
 class Transformer(nn.Module):
@@ -92,7 +91,6 @@ class Transformer(nn.Module):
         )
         self.rope = RoPE(rope_config)
 
-        # 权重绑定
         self.tok_embeddings.weight = self.lm_head.weight
 
         self.apply(self._init_weights)
@@ -119,17 +117,20 @@ class Transformer(nn.Module):
             tokens: torch.Tensor,
             return_hidden_states: bool = False,
             kv_cache: Optional[KVCache] = None,
-            start_pos: int = 0
+            start_pos: int = 0,
+            paged_attention_inputs: Optional[Tuple] = None,
     ) -> torch.Tensor:
-        bs, seq_len = tokens.shape
-
-        if not kv_cache:
+        # PagedAttention 模式下，输入 tokens 是一个扁平化的张量
+        is_paged = paged_attention_inputs is not None
+        if not is_paged:
+            bs, seq_len = tokens.shape
             assert seq_len <= self.args.max_seq_len, "输入序列长度超过模型最大长度限制"
 
         h = self.tok_embeddings(tokens)
 
         for i, layer in enumerate(self.layers):
-            h = layer(h, self.rope, layer_idx=i, kv_cache=kv_cache, start_pos=start_pos)
+            h = layer(h, self.rope, layer_idx=i, kv_cache=kv_cache, start_pos=start_pos,
+                      paged_attention_inputs=paged_attention_inputs)
 
         h = self.norm(h)
 

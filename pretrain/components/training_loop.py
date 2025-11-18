@@ -1,7 +1,8 @@
 # FILE: pretrain/components/training_loop.py
 """
-【v3.7 - DDP 死锁终极修复版】
-- 重构 evaluate 方法，让所有 DDP 进程参与数据加载迭代，但只有主进程计算，彻底修复验证死锁。
+【v3.9 - DDP验证终极正确性修复】
+- 重构`evaluate`方法，让所有进程都迭代`DataLoader`以保证`DistributedSampler`的同步。
+- 只有主进程执行模型计算，从而在保持DDP正确性的同时，解决了CPU计算缓慢导致的`torchrun`超时问题。
 """
 import torch
 import torch.nn.functional as F
@@ -22,6 +23,7 @@ from .checkpointing import CheckpointManager
 from evaluation.metrics.perplexity import calculate_perplexity
 from .hooks import ForwardHook, BackwardHook
 from utils.ddp_utils import is_main_process, get_world_size
+import torch.distributed as dist
 
 try:
     from torch.cuda.amp import GradScaler
@@ -156,10 +158,11 @@ class Trainer:
                 global_grad_norm = torch.nn.utils.clip_grad_norm_(model_for_clip.parameters(), current_clip_value)
 
                 if not torch.isnan(global_grad_norm) and not torch.isinf(
-                    global_grad_norm): self.grad_norm_history.append(global_grad_norm.item())
+                        global_grad_norm): self.grad_norm_history.append(global_grad_norm.item())
 
                 if self.use_gpu_amp:
-                    self.scaler.step(self.optimizer); self.scaler.update()
+                    self.scaler.step(self.optimizer);
+                    self.scaler.update()
                 else:
                     self.optimizer.step()
 
@@ -188,25 +191,21 @@ class Trainer:
 
     @torch.no_grad()
     def evaluate(self, epoch, global_step):
-        # [CRITICAL DDP FIX]
-        # 所有进程都需要进入这个函数并迭代dataloader，以确保分布式采样器同步。
-        # 否则，非主进程会跳过验证并抢先进入下一个训练epoch，导致主进程在dataloader上死锁。
         if self.val_loader is None:
-            # 即使没有验证集，也要确保所有进程行为一致
             if get_world_size() > 1:
-                torch.distributed.barrier()
+                dist.barrier()
             return {'loss': -1, 'perplexity': -1}
 
         self.model.eval()
         total_loss = 0
-
-        # 所有进程都创建pbar，但只有主进程会显示它
+        # 所有进程都创建pbar并迭代，但只有主进程会显示它
         pbar = tqdm(self.val_loader, desc=f"Epoch {epoch} [Validation]", disable=not is_main_process())
 
+        # [核心修复] 所有进程都必须迭代，以保持 DistributedSampler 同步
         for x, y, loss_mask in pbar:
             x, y, loss_mask = x.to(self.device), y.to(self.device), loss_mask.to(self.device)
 
-            # 只有主进程进行实际的计算和指标累加
+            # [核心修复] 只有主进程进行实际的计算
             if is_main_process():
                 amp_context = torch.autocast(device_type=self.device,
                                              dtype=torch.bfloat16 if self.use_cpu_amp else torch.float16,
@@ -217,15 +216,17 @@ class Trainer:
                 total_loss += loss.item()
                 pbar.set_postfix_str(f"loss={loss.item():.4f}")
 
-        # 计算最终指标
-        avg_loss = total_loss / len(self.val_loader) if is_main_process() and len(self.val_loader) > 0 else -1
+        # 计算和处理最终指标
+        avg_loss = -1.0
+        if is_main_process():
+            avg_loss = total_loss / len(self.val_loader) if len(self.val_loader) > 0 else -1.0
 
-        # 在DDP模式下，我们需要将主进程计算出的avg_loss广播给所有其他进程，
-        # 尽管它们不会使用它，但这是一种好的实践，可以用于未来的同步需求。
+        # 如果在DDP模式下，主进程需要将计算出的avg_loss广播给所有其他进程
+        # 这样所有进程都能返回一致的指标，尽管只有主进程会使用它
         if get_world_size() > 1:
             loss_tensor = torch.tensor(avg_loss, device=self.device)
-            torch.distributed.broadcast(loss_tensor, src=0)
-            avg_loss = loss_tensor.item()
+            dist.broadcast(loss_tensor, src=0)
+            avg_loss = loss_tensor.item()  # 非主进程现在接收到了正确的值
 
         return {'loss': avg_loss, 'perplexity': calculate_perplexity(avg_loss)}
 
@@ -236,10 +237,9 @@ class Trainer:
             avg_train_loss, global_step, epoch_duration_s = self.train_epoch(epoch, global_step)
             eval_metrics = self.evaluate(epoch, global_step)
 
-            # [CRITICAL DDP FIX] 这个屏障现在变得至关重要。
-            # 它确保在主进程完成日志记录和保存检查点之前，没有任何进程可以进入下一个循环。
+            # 在记录和保存之前，确保所有进程都完成了验证
             if get_world_size() > 1:
-                torch.distributed.barrier()
+                dist.barrier()
 
             if is_main_process():
                 summary_metrics = {'train/loss_epoch': avg_train_loss, 'epoch_duration_s': epoch_duration_s,
@@ -248,7 +248,9 @@ class Trainer:
                 is_best = eval_metrics['loss'] != -1 and eval_metrics['loss'] < self.ckpt_manager.best_val_loss
                 if is_best: self.ckpt_manager.best_val_loss = eval_metrics['loss']
                 self.ckpt_manager.save(epoch, eval_metrics['loss'], is_best)
-        if is_main_process(): self.logger.finish()
+
+        if is_main_process():
+            self.logger.finish()
 
 
 # END OF FILE: pretrain/components/training_loop.py

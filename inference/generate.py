@@ -1,42 +1,28 @@
 # FILE: inference/generate.py
 # -*- coding: utf-8 -*-
 """
-[v2.3 - 语义净化版]
-- 核心修复：将 `max_gen_len` 参数重命名为 `max_new_tokens`，以消除语义歧义并修复 PPO rollout 中的 silent bug。
+[v2.6 - 架构重构] 基础的、一体化的 token 生成器。
+
+此文件中的 `generate` 和 `generate_stream` 函数提供了一个简单、自包含的
+推理实现。它们在一个函数内部混合了 Prefill 和 Decode 逻辑。
+
+对于更结构化、更清晰地展示“PD分离”思想的推理架构，请参考 `inference/engine/engine.py`。
+那个文件中的 `InferenceEngine` 是一个更接近工业级推理引擎设计的迷你实现。
 """
 import torch
-import torch.nn.functional as F
-from tqdm import tqdm
 from typing import Iterator
 
-from models.transformer import Transformer, ModelArgs
-from inference.kv_cache import KVCache
-
-
-def top_k_top_p_sampling(logits, top_k=50, top_p=1.0, temperature=1.0):
-    logits = logits / temperature
-    if top_k > 0:
-        top_k_vals, _ = torch.topk(logits, top_k)
-        kth_vals = top_k_vals[:, -1].unsqueeze(-1)
-        logits[logits < kth_vals] = -float('Inf')
-    if top_p < 1.0:
-        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-        sorted_indices_to_remove = cumulative_probs > top_p
-        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-        sorted_indices_to_remove[..., 0] = 0
-        indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
-        logits[indices_to_remove] = -float('Inf')
-    probs = F.softmax(logits, dim=-1)
-    next_token = torch.multinomial(probs, num_samples=1)
-    return next_token
+# [核心修改] 更新导入路径
+from models.transformer import Transformer
+from inference.engine.kv_cache import KVCache
+from inference.strategies.sampling import sample
 
 
 @torch.no_grad()
 def generate(
         model: Transformer,
         prompt_tokens: torch.Tensor,
-        max_new_tokens: int,  # [核心修改] 参数名变更，语义更清晰
+        max_new_tokens: int,
         temperature: float = 0.8,
         top_k: int = 50,
         top_p: float = 0.9,
@@ -60,12 +46,11 @@ def generate(
     all_tokens = [prompt_tokens]
     current_token = prompt_tokens[:, -1].view(bs, 1)
 
-    # [核心修改] 确保生成的总长度不超过模型的最大长度限制
     total_len = min(max_seq_len, prompt_len + max_new_tokens)
 
     for cur_pos in range(prompt_len, total_len):
         logits = model(current_token, kv_cache=kv_cache, start_pos=cur_pos - 1)
-        next_token = top_k_top_p_sampling(logits[:, -1, :], top_k, top_p, temperature)
+        next_token = sample(logits[:, -1, :], temperature=temperature, top_k=top_k, top_p=top_p).to(device)
 
         all_tokens.append(next_token)
         current_token = next_token
@@ -82,7 +67,7 @@ def generate(
 def generate_stream(
         model: Transformer,
         prompt_tokens: torch.Tensor,
-        max_new_tokens: int,  # [核心修改] 参数名变更
+        max_new_tokens: int,
         temperature: float = 0.8,
         top_k: int = 50,
         top_p: float = 0.9,
@@ -107,12 +92,11 @@ def generate_stream(
 
     current_token = prompt_tokens[:, -1].view(bs, 1)
 
-    # [核心修改] 确保生成的总长度不超过模型的最大长度限制
     total_len = min(max_seq_len, prompt_len + max_new_tokens)
 
     for cur_pos in range(prompt_len, total_len):
         logits = model(current_token, kv_cache=kv_cache, start_pos=cur_pos - 1)
-        next_token = top_k_top_p_sampling(logits[:, -1, :], top_k, top_p, temperature)
+        next_token = sample(logits[:, -1, :], temperature=temperature, top_k=top_k, top_p=top_p).to(device)
 
         current_token = next_token
 
