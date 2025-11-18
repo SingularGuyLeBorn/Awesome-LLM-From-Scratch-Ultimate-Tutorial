@@ -1,0 +1,74 @@
+# FILE: configs/pretrain/variants/moba_moe_nano.yaml
+# ===================================================================
+# [终极缝合] MoBA + MoE 架构验证配置
+# 核心特性:
+# 1. Sparse Attention (MoBA): 稀疏注意力
+# 2. Sparse FFN (MoE): 稀疏前馈网络
+# 这是一个完全稀疏化的 Transformer Block
+# ===================================================================
+
+run_name: "moba-moe-nano-{timestamp}"
+output_dir: "./runs/"
+device: "cpu"
+
+console:
+  verbose: true
+
+data:
+  data_dir: "./data_pipeline/processed_data/"
+  tokenizer_name: "./data_pipeline/processed_data/tinystories_project_vs4096.json"
+  train_data_limit: 1000
+  val_data_limit: 50
+
+model:
+  # --- 基础模型参数 ---
+  dim: 128
+  n_layers: 4
+  n_heads: 4
+  n_kv_heads: 2
+  vocab_size: 4096
+  multiple_of: 32
+  norm_eps: 1.0e-5
+  max_seq_len: 1024     # 长序列以激活 MoBA
+
+  # --- [核心] Attention 变体 ---
+  attention_variant: "moba"
+
+  # --- [MoBA] 参数配置 ---
+  moba_block_size: 128    # 历史块大小
+  moba_topk: 2            # 选择 2 个历史块
+
+  # --- [MoE FFN] 混合专家配置 (同时开启!) ---
+  num_experts: 4          # 4 个 FFN 专家
+  num_experts_per_tok: 2  # 每次激活 2 个
+
+  use_activation_checkpointing: true
+
+training:
+  batch_size: 2
+  gradient_accumulation_steps: 8
+  max_epochs: 1
+  learning_rate: 5.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  min_lr_ratio: 0.1
+  clip_grad_norm: 1.0
+
+  loss_spike_threshold: 5.0
+  max_consecutive_spikes: 5
+  grad_norm_history_size: 100
+  grad_clip_percentile: 0.9
+  dynamic_clip_factor: 1.5
+
+logging:
+  log_interval: 1
+  swanlab:
+    enable: true
+    project: "MoBA-MoE-Experiments"
+    experiment_name: "{run_name}"
+
+checkpointing:
+  save_interval: 100
+  resume_from: "none"
+
+# END OF FILE: configs/pretrain/variants/moba_moe_nano.yaml

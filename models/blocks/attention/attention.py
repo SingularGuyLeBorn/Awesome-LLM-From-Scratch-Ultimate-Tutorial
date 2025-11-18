@@ -1,13 +1,7 @@
 # FILE: models/blocks/attention/attention.py
 """
-【Attention Museum - 入口文件】
-这是一个工厂包装器，负责根据配置 (args.attention_variant)
-实例化并调用具体的注意力实现。
-
-具体实现位于同级目录的:
-- standard.py (MHA, GQA, MQA, MLA)
-- linear.py (Linear Attention)
-- sparse.py (MoBA)
+【Attention Museum - v3.4 NSA 集成版】
+- 在工厂类中新增 "nsa" 选项。
 """
 import torch.nn as nn
 from models.config import ModelArgs
@@ -15,7 +9,7 @@ from models.config import ModelArgs
 # 导入各个流派的实现
 from .standard import StandardAttention, MultiHeadLatentAttention
 from .linear import LinearAttention
-from .sparse import MixtureOfBlockAttention
+from .sparse import MixtureOfBlockAttention, NativeSparseAttention
 
 
 class Attention(nn.Module):
@@ -35,13 +29,14 @@ class Attention(nn.Module):
             self.impl = LinearAttention(args)
         elif self.variant == "moba":
             self.impl = MixtureOfBlockAttention(args)
+        elif self.variant == "nsa":
+            self.impl = NativeSparseAttention(args)
         else:
             raise ValueError(f"Unknown attention variant: {self.variant}")
 
     def forward(self, x, rope, layer_idx, kv_cache=None, start_pos=0, paged_attention_inputs=None, **kwargs):
         """
         统一的前向传播接口。
-        显式接收 paged_attention_inputs 以避免参数冲突。
         """
         return self.impl(
             x,

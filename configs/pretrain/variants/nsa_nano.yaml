@@ -1,0 +1,77 @@
+# FILE: configs/pretrain/variants/nsa_nano.yaml
+# ===================================================================
+# NSA (Native Sparse Attention) 架构验证配置
+# 核心特性:
+# 1. Hierarchical Sparsity: Sliding Window + Selection + Compression
+# 2. 模拟 DeepSeek 长上下文模型的核心思想
+# ===================================================================
+
+run_name: "nsa-nano-{timestamp}"
+output_dir: "./runs/"
+device: "cpu"
+
+console:
+  verbose: true
+
+data:
+  data_dir: "./data_pipeline/processed_data/"
+  tokenizer_name: "./data_pipeline/processed_data/tinystories_project_vs4096.json"
+  train_data_limit: 200 # NSA 计算量大，测试时少用点数据
+  val_data_limit: 20
+
+model:
+  # --- 基础模型参数 ---
+  dim: 64              # 缩小维度以在 CPU 上运行
+  n_layers: 2
+  n_heads: 2
+  # [核心修复] 显式设置 n_kv_heads，防止默认值 8 导致的维度错误
+  n_kv_heads: 2        # 这里使用 MHA 设置 (2 query heads, 2 kv heads)
+
+  vocab_size: 4096
+  multiple_of: 32
+  norm_eps: 1.0e-5
+  max_seq_len: 1024     # NSA 专为长序列设计
+  dropout: 0.0
+
+  # --- [核心] Attention 变体 ---
+  attention_variant: "nsa"
+
+  # --- [NSA] 参数配置 ---
+  nsa_compression_block_size: 64
+  nsa_selection_block_size: 128
+  nsa_selected_blocks: 2
+  nsa_sliding_window_size: 256
+
+  # --- MoE FFN (关闭) ---
+  num_experts: 0
+
+  use_activation_checkpointing: true
+
+training:
+  batch_size: 1 # 长序列 + 复杂计算，batch 设为 1
+  gradient_accumulation_steps: 16
+  max_epochs: 1
+  learning_rate: 3.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  min_lr_ratio: 0.1
+  clip_grad_norm: 1.0
+
+  loss_spike_threshold: 5.0
+  max_consecutive_spikes: 5
+  grad_norm_history_size: 100
+  grad_clip_percentile: 0.9
+  dynamic_clip_factor: 1.5
+
+logging:
+  log_interval: 1
+  swanlab:
+    enable: true
+    project: "NSA-Experiments"
+    experiment_name: "{run_name}"
+
+checkpointing:
+  save_interval: 50
+  resume_from: "none"
+
+# END OF FILE: configs/pretrain/variants/nsa_nano.yaml
