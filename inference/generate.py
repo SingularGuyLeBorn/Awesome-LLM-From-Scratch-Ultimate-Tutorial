@@ -1,20 +1,14 @@
 # FILE: inference/generate.py
 # -*- coding: utf-8 -*-
 """
-[v2.6 - 架构重构] 基础的、一体化的 token 生成器。
-
-此文件中的 `generate` 和 `generate_stream` 函数提供了一个简单、自包含的
-推理实现。它们在一个函数内部混合了 Prefill 和 Decode 逻辑。
-
-对于更结构化、更清晰地展示“PD分离”思想的推理架构，请参考 `inference/engine/engine.py`。
-那个文件中的 `InferenceEngine` 是一个更接近工业级推理引擎设计的迷你实现。
+[v2.7 - KVCache 适配]
+- generate 函数不再直接创建 KVCache。
+- 改为调用 model.create_kv_cache()，以支持 Standard 和 Latent 两种缓存类型。
 """
 import torch
 from typing import Iterator
 
-# [核心修改] 更新导入路径
 from models.transformer import Transformer
-from inference.engine.kv_cache import KVCache
 from inference.strategies.sampling import sample
 
 
@@ -30,23 +24,21 @@ def generate(
 ) -> torch.Tensor:
     model.eval()
     bs, prompt_len = prompt_tokens.shape
-    max_seq_len = model.args.max_seq_len
     device = prompt_tokens.device
-    dtype = model.tok_embeddings.weight.dtype
+    dtype = next(model.parameters()).dtype
 
-    kv_cache = KVCache(
-        max_batch_size=bs, max_seq_len=max_seq_len, n_layers=model.args.n_layers,
-        n_kv_heads=model.args.n_kv_heads, head_dim=model.args.dim // model.args.n_heads,
-        device=device, dtype=dtype
-    )
+    # [核心修改] 调用模型工厂方法创建合适的 KV Cache
+    kv_cache = model.create_kv_cache(max_batch_size=bs, device=device, dtype=dtype)
 
+    # Prefill
     model(prompt_tokens, kv_cache=kv_cache, start_pos=0)
 
+    # Decode
     eos_reached = torch.zeros(bs, dtype=torch.bool, device=device)
     all_tokens = [prompt_tokens]
     current_token = prompt_tokens[:, -1].view(bs, 1)
 
-    total_len = min(max_seq_len, prompt_len + max_new_tokens)
+    total_len = min(model.args.max_seq_len, prompt_len + max_new_tokens)
 
     for cur_pos in range(prompt_len, total_len):
         logits = model(current_token, kv_cache=kv_cache, start_pos=cur_pos - 1)
@@ -75,24 +67,19 @@ def generate_stream(
 ) -> Iterator[int]:
     model.eval()
     bs, prompt_len = prompt_tokens.shape
-
-    assert bs == 1, "Streaming generation only supports a batch size of 1."
-
-    max_seq_len = model.args.max_seq_len
+    assert bs == 1, "Streaming only supports batch size of 1."
     device = prompt_tokens.device
-    dtype = model.tok_embeddings.weight.dtype
+    dtype = next(model.parameters()).dtype
 
-    kv_cache = KVCache(
-        max_batch_size=bs, max_seq_len=max_seq_len, n_layers=model.args.n_layers,
-        n_kv_heads=model.args.n_kv_heads, head_dim=model.args.dim // model.args.n_heads,
-        device=device, dtype=dtype
-    )
+    # [核心修改]
+    kv_cache = model.create_kv_cache(max_batch_size=bs, device=device, dtype=dtype)
 
+    # Prefill
     model(prompt_tokens, kv_cache=kv_cache, start_pos=0)
 
+    # Decode
     current_token = prompt_tokens[:, -1].view(bs, 1)
-
-    total_len = min(max_seq_len, prompt_len + max_new_tokens)
+    total_len = min(model.args.max_seq_len, prompt_len + max_new_tokens)
 
     for cur_pos in range(prompt_len, total_len):
         logits = model(current_token, kv_cache=kv_cache, start_pos=cur_pos - 1)

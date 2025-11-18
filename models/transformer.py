@@ -1,8 +1,8 @@
 # FILE: models/transformer.py
 """
-【v3.3 - RoPE 维度修复版】
-- [核心修复] 修复 MLA 模式下 RoPE 初始化维度错误的问题。
-  MLA 的 RoPE 只作用于 rope_head_dim (例如16)，而不是完整的 head_dim (例如32)。
+【v3.4 - KVCache 适配版】
+- Transformer.__init__ 现在根据 attention_variant 实例化正确的 KVCache (Standard vs Latent)。
+- KVCache 实例现在作为模型的一部分，而不是在 generate 函数中临时创建。
 """
 import sys
 import os
@@ -25,15 +25,16 @@ from models.blocks.feedforward.feedforward import FeedForward
 from models.blocks.feedforward.moe import MoELayer
 from models.blocks.normalization.normalization import RMSNorm
 from models.blocks.positional_encoding.positional_encoding import RoPE, RoPEConfig
-from inference.engine.kv_cache import KVCache
+# [核心修改] 导入所有 KVCache 类型
+from inference.engine.kv_cache import KVCacheBase, StandardKVCache, LatentKVCache
 
 
 class TransformerBlock(nn.Module):
+    # ... (代码不变)
     def __init__(self, args: ModelArgs, layer_id: int):
         super().__init__()
         self.attention = Attention(args)
 
-        # MoE Logic
         is_moe_layer = (args.num_experts > 1) and (
                 args.moe_layers_indices is None or layer_id in args.moe_layers_indices
         )
@@ -57,7 +58,7 @@ class TransformerBlock(nn.Module):
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.use_checkpointing = args.use_activation_checkpointing
 
-    def _forward_impl(self, x: torch.Tensor, rope: RoPE, layer_idx: int, kv_cache: Optional[KVCache] = None,
+    def _forward_impl(self, x: torch.Tensor, rope: RoPE, layer_idx: int, kv_cache: Optional[KVCacheBase] = None,
                       start_pos: int = 0, paged_attention_inputs: Optional[Tuple] = None) -> torch.Tensor:
         attn_input = self.attention_norm(x)
         h = x + self.attention(
@@ -66,9 +67,9 @@ class TransformerBlock(nn.Module):
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
-    def forward(self, x: torch.Tensor, rope: RoPE, layer_idx: int, kv_cache: Optional[KVCache] = None,
+    def forward(self, x: torch.Tensor, rope: RoPE, layer_idx: int, kv_cache: Optional[KVCacheBase] = None,
                 start_pos: int = 0, paged_attention_inputs: Optional[Tuple] = None) -> torch.Tensor:
-        if self.use_checkpointing:
+        if self.training and self.use_checkpointing:
             return checkpoint(
                 lambda *inputs: self._forward_impl(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5]),
                 x, rope, layer_idx, kv_cache, start_pos, paged_attention_inputs,
@@ -89,9 +90,6 @@ class Transformer(nn.Module):
         self.norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.lm_head = nn.Linear(args.dim, args.vocab_size, bias=False)
 
-        # [核心修复] 动态计算 RoPE 的维度
-        # 如果是 MLA，RoPE 只作用于 decoupling 后的 PE 部分 (例如 16 维)
-        # 否则 (MHA/GQA)，RoPE 作用于整个 head_dim (例如 128 维)
         if args.attention_variant == "mla":
             rope_dim = args.rope_head_dim
         else:
@@ -108,10 +106,10 @@ class Transformer(nn.Module):
 
         self.apply(self._init_weights)
 
-        if args.use_activation_checkpointing:
-            logging.info("Gradient Checkpointing: ENABLED")
-        if args.num_experts > 1:
-            logging.info(f"MoE Architecture: ENABLED ({args.num_experts} experts, top-{args.num_experts_per_tok})")
+        # 日志
+        if args.use_activation_checkpointing: logging.info("Gradient Checkpointing: ENABLED")
+        if args.num_experts > 1: logging.info(
+            f"MoE Architecture: ENABLED ({args.num_experts} experts, top-{args.num_experts_per_tok})")
         logging.info(f"Attention Mechanism: {args.attention_variant.upper()} (RoPE dim: {rope_dim})")
 
     def _init_weights(self, module):
@@ -127,14 +125,14 @@ class Transformer(nn.Module):
             self,
             tokens: torch.Tensor,
             return_hidden_states: bool = False,
-            kv_cache: Optional[KVCache] = None,
+            kv_cache: Optional[KVCacheBase] = None,
             start_pos: int = 0,
             paged_attention_inputs: Optional[Tuple] = None,
     ) -> torch.Tensor:
         is_paged = paged_attention_inputs is not None
         if not is_paged:
-            bs, seq_len = tokens.shape
-            assert seq_len <= self.args.max_seq_len, f"Input sequence length ({seq_len}) exceeds limit ({self.args.max_seq_len})."
+            _bsz, seqlen = tokens.shape
+            assert seqlen <= self.args.max_seq_len, f"Cannot forward sequence of length {seqlen}, max is {self.args.max_seq_len}"
 
         h = self.tok_embeddings(tokens)
 
@@ -149,5 +147,28 @@ class Transformer(nn.Module):
 
         logits = self.lm_head(h)
         return logits
+
+    # [新增] 辅助函数，用于在推理前创建正确的 KVCache
+    def create_kv_cache(self, max_batch_size: int, device: torch.device, dtype: torch.dtype) -> KVCacheBase:
+        if self.args.attention_variant == "mla":
+            return LatentKVCache(
+                max_batch_size=max_batch_size,
+                max_seq_len=self.args.max_seq_len,
+                n_layers=self.args.n_layers,
+                kv_lora_rank=self.args.kv_lora_rank,
+                rope_head_dim=self.args.rope_head_dim,
+                device=device,
+                dtype=dtype
+            )
+        else:  # mha, gqa, mqa, linear, moba
+            return StandardKVCache(
+                max_batch_size=max_batch_size,
+                max_seq_len=self.args.max_seq_len,
+                n_layers=self.args.n_layers,
+                n_kv_heads=self.args.n_kv_heads,
+                head_dim=self.args.dim // self.args.n_heads,
+                device=device,
+                dtype=dtype
+            )
 
 # END OF FILE: models/transformer.py
