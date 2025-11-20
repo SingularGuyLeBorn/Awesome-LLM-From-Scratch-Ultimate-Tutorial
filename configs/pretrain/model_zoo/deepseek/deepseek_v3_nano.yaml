@@ -1,0 +1,81 @@
+# FILE: configs/pretrain/model_zoo/deepseek/deepseek_v3_nano.yaml
+# ==============================================================================
+# 【模型档案】 DeepSeek-V3 Nano (Pico-Scale / 极速验证版)
+# ==============================================================================
+#
+# 🧪 定位与用途 (Purpose):
+#    - 参数量: ~0.2M (二十万参数)
+#    - 核心用途: CI/CD 集成测试、算法逻辑冒烟测试、代码重构后的快速回归。
+#    - 运行速度: 单核 CPU 也能“秒解”。
+#
+# 🔬 架构缩放 (Scaling Strategy):
+#    尽管小到极致，但它依然保留了 DeepSeek-V3 的完整拓扑结构：
+#    1. MLA: 依然执行 KV 压缩与解压 (Rank=16)。
+#    2. MoE: 依然执行 路由与共享专家计算 (4 Routed + 1 Shared)。
+#    3. RoPE: 依然执行 解耦的位置编码。
+#
+# ==============================================================================
+
+run_name: "deepseek-v3-nano-{timestamp}"
+output_dir: "./runs/"
+device: "cpu"
+
+console:
+  verbose: true # 开启详细打印，观察参数量
+
+data:
+  data_dir: "./data_pipeline/processed_data/"
+  tokenizer_name: "./data_pipeline/processed_data/tinystories_project_vs4096.json"
+  # 数据量极小，只为了跑通流程
+  train_data_limit: 200
+  val_data_limit: 20
+
+model:
+  # --- Pico Scale (~0.2M Params) ---
+  dim: 64               # 极窄隐藏层 (64 = 4 heads * 16 dim)
+  n_layers: 2           # 极浅网络 (2层：1层学特征，1层整合)
+  n_heads: 4            # 4 个头
+  vocab_size: 4096      # 词表不变
+  multiple_of: 16       # 对齐
+  norm_eps: 1.0e-5
+  max_seq_len: 128      # 极短序列 (128 tokens)
+  dropout: 0.0
+
+  # --- [MLA] 微型压缩 ---
+  attention_variant: "mla"
+  q_lora_rank: 16       # Query 压缩到 16 维
+  kv_lora_rank: 16      # KV 压缩到 16 维
+  v_head_dim: 16        # Value 维度
+  rope_head_dim: 8      # RoPE 维度
+  nope_head_dim: 8      # Non-RoPE 维度
+
+  # --- [DeepSeekMoE] 微型专家 ---
+  num_experts: 4          # 4 个路由专家
+  num_shared_experts: 1   # 1 个共享专家
+  num_experts_per_tok: 2  # Top-2 路由
+
+  use_aux_free_lb: true   # 依然开启 Bias 负载均衡
+
+  use_activation_checkpointing: false
+
+training:
+  batch_size: 8
+  gradient_accumulation_steps: 1
+  max_epochs: 1
+  learning_rate: 5.0e-3 # 极小模型需要很大的学习率才能看到 Loss 变化
+  weight_decay: 0.0
+  clip_grad_norm: 1.0
+
+  # 稳定性监控放宽
+  loss_spike_threshold: 10.0
+
+logging:
+  log_interval: 1     # 每步都打印
+  swanlab:
+    enable: false
+
+checkpointing:
+  save_interval: 50   # 不怎么需要保存，或者最后保存一下
+  resume_from: "none"
+
+# END OF FILE: configs/pretrain/model_zoo/deepseek/deepseek_v3_nano.yaml

@@ -1,7 +1,9 @@
 # FILE: models/config.py
 """
-[v3.1 - NSA Config Fix]
-- ModelArgs 新增 NSA (Native Sparse Attention) 相关参数。
+[v3.2 - DeepSeek-V3 Support]
+- 新增 DeepSeek-V3 核心特性参数:
+  1. aux_free_lb: 无辅助损失负载均衡
+  2. num_shared_experts: 共享专家 (DeepSeekMoE)
 """
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
@@ -16,7 +18,7 @@ class ModelArgs:
     n_kv_heads: int = 8
     vocab_size: int = -1
 
-    # --- FFN & MoE ---
+    # --- FFN & MoE (DeepSeek-V3 Update) ---
     ffn_hidden_dim: int = None
     multiple_of: int = 256
     norm_eps: float = 1e-5
@@ -24,6 +26,10 @@ class ModelArgs:
     num_experts: int = 0
     num_experts_per_tok: int = 2
     moe_layers_indices: Optional[List[int]] = None
+
+    # [DeepSeek-V3 新增]
+    num_shared_experts: int = 0  # 共享专家数量 (总是激活)
+    use_aux_free_lb: bool = False  # 是否使用无辅助损失负载均衡 (Bias update)
 
     # --- Attention 变体 ---
     attention_variant: str = "mha"
@@ -39,7 +45,7 @@ class ModelArgs:
     moba_block_size: int = 512
     moba_topk: int = 2
 
-    # [NSA 参数 - 新增]
+    # [NSA 参数]
     nsa_compression_block_size: int = 64
     nsa_selection_block_size: int = 128
     nsa_selected_blocks: int = 4

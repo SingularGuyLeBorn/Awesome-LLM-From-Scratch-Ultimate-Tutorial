@@ -1,0 +1,109 @@
+# FILE: configs/pretrain/model_zoo/deepseek/deepseek_v3_mini.yaml
+# ==============================================================================
+# 【模型档案】 DeepSeek-V3 mini (High-Fidelity / 高保真复刻版)
+# ==============================================================================
+#
+# 🎯 设计目标 (Design Philosophy):
+#    这是一个专为 "验证稀疏逻辑" 设计的纳米级模型 (约 1.6M 参数)。
+#    它不仅保留了 MLA 和 DeepSeekMoE，还通过特意调整的 Context/Block 比例，
+#    强制模型在 CPU 上执行真实的稀疏注意力计算 (NSA/MoBA)，防止退化为标准 Attention。
+#
+# 🏗️ 核心参数解构 (Critical Configuration):
+#
+#    [1] 强制稀疏化 (Forced Sparsity):
+#        - Context: 1024 tokens
+#        - Block Size: 64 tokens
+#        - 结果: 16 个 Blocks。模型必须使用 Top-K (k=2) 算法在 16 个块中选择 2 个。
+#        - 验证: 如果代码逻辑有误，这里会立即报错 (Tensor Shape Mismatch)。
+#
+#    [2] MLA (极致压缩):
+#        - KV Compression: 32 dim. 极小的 KV Cache，模拟 V3 的核心优势。
+#
+#    [3] DeepSeekMoE (Aux-free):
+#        - 4 Routed + 1 Shared。启用 Bias-based 负载均衡。
+#
+# ==============================================================================
+
+run_name: "deepseek-v3-mini-sparse-check-{timestamp}"
+output_dir: "./runs/"
+device: "cpu"
+
+console:
+  verbose: true # 开启详细打印，观察参数量和架构
+
+data:
+  data_dir: "./data_pipeline/processed_data/"
+  tokenizer_name: "./data_pipeline/processed_data/tinystories_project_vs4096.json"
+  # [关键修改] 增加数据量以支持 Packing 到 1024 长度
+  train_data_limit: 2000 
+  val_data_limit: 100
+
+model:
+  # --- 基础规模 (~1.6M Params) ---
+  dim: 96               # 隐藏层维度 (96 = 6 heads * 16 head_dim)
+  n_layers: 3           # 3层足以验证梯度传播
+  n_heads: 6            # 注意力头数
+  vocab_size: 4096      # 词表
+  multiple_of: 16       # FFN 对齐
+  norm_eps: 1.0e-5
+  
+  # [关键修改] 长序列配置
+  max_seq_len: 1024     # 足够长，允许切分为多个 Block
+  dropout: 0.0
+
+  # --- [核心] Attention: MLA + Sparse 变体 ---
+  attention_variant: "mla" # 也可以改为 'moba' 或 'nsa' 进行单独测试
+  
+  # MLA 压缩参数
+  q_lora_rank: 64
+  kv_lora_rank: 32
+  v_head_dim: 16
+  rope_head_dim: 8
+  nope_head_dim: 8
+
+  # [关键修改] MoBA/NSA 稀疏参数 (强制小 Block)
+  moba_block_size: 64    # 64 < 1024，确保产生 16 个块
+  moba_topk: 2           # 只关注 2 个块 (稀疏度 ~87.5%)
+  
+  # NSA 参数 (同理)
+  nsa_compression_block_size: 32
+  nsa_selection_block_size: 64
+  nsa_selected_blocks: 2
+  nsa_sliding_window_size: 128
+
+  # --- [核心] DeepSeekMoE 配置 ---
+  num_experts: 4          # 路由专家
+  num_shared_experts: 1   # 共享专家
+  num_experts_per_tok: 2  # Top-2
+  
+  # 开启无辅助损失负载均衡
+  use_aux_free_lb: true   
+
+  # CPU 调试建议关闭 Checkpointing
+  use_activation_checkpointing: false
+
+training:
+  # Batch Size 减小以适应 Sequence Length 增加 (8 -> 4)
+  batch_size: 4
+  gradient_accumulation_steps: 4 # 保持总 Batch Size 足够大
+  max_epochs: 1
+  
+  learning_rate: 3.0e-3
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  min_lr_ratio: 0.1
+  clip_grad_norm: 1.0
+  
+  loss_spike_threshold: 5.0
+  dynamic_clip_factor: 1.5
+
+logging:
+  log_interval: 5 # 打印更频繁一点
+  swanlab:
+    enable: false
+
+checkpointing:
+  save_interval: 500
+  resume_from: "none"
+
+# END OF FILE: configs/pretrain/model_zoo/deepseek/deepseek_v3_mini.yaml

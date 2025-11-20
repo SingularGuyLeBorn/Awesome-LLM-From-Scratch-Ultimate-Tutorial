@@ -1,0 +1,74 @@
+# FILE: configs/pretrain/model_zoo/deepseek/deepseek_v3_muon.yaml
+# ==============================================================================
+# 【验证配置】 DeepSeek-V3 Mini (Muon Optimizer Edition)
+# ==============================================================================
+#
+# 🎯 核心验证点:
+#    1. Muon 优化器:
+#       - 验证 2D 权重是否被分配到 Muon 组。
+#       - 验证 Newton-Schulz 迭代是否在 CPU 上正常运行。
+#    2. Aux-free LB (Dynamic Update):
+#       - 验证 Bias 是否随训练步数更新。
+#
+# ==============================================================================
+
+run_name: "deepseek-v3-muon-{timestamp}"
+output_dir: "./runs/"
+device: "cpu"
+
+console:
+  verbose: true
+
+data:
+  data_dir: "./data_pipeline/processed_data/"
+  tokenizer_name: "./data_pipeline/processed_data/tinystories_project_vs4096.json"
+  train_data_limit: 1000
+  val_data_limit: 50
+
+model:
+  dim: 128
+  n_layers: 4
+  n_heads: 4
+  vocab_size: 4096
+  multiple_of: 16
+  norm_eps: 1.0e-5
+  max_seq_len: 512
+  dropout: 0.0
+
+  attention_variant: "mla"
+  q_lora_rank: 64
+  kv_lora_rank: 32
+  v_head_dim: 32
+  rope_head_dim: 16
+  nope_head_dim: 16
+
+  num_experts: 4
+  num_shared_experts: 1
+  num_experts_per_tok: 2
+  use_aux_free_lb: true
+
+  use_activation_checkpointing: false
+
+training:
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  max_epochs: 1
+
+  # [核心] 启用 Muon 优化器
+  optimizer_type: "muon"
+
+  # Muon 通常需要更高的学习率
+  learning_rate: 0.02
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  min_lr_ratio: 0.1
+  clip_grad_norm: 1.0
+
+logging:
+  log_interval: 5
+
+checkpointing:
+  save_interval: 200
+  resume_from: "none"
+
+# END OF FILE: configs/pretrain/model_zoo/deepseek/deepseek_v3_muon.yaml
