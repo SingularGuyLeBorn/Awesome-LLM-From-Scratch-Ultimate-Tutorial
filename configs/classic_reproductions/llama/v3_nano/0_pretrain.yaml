@@ -1,0 +1,40 @@
+run_name: pretrain-llama-v3_nano-{timestamp}
+output_dir: ./runs/
+device: cpu
+console:
+  verbose: true
+data:
+  tokenizer_name: ./data_pipeline/processed_data/tinystories_project_vs4096.json
+  data_dir: ./data_pipeline/processed_data/
+  train_data_limit: 500
+  val_data_limit: 20
+model:
+  dim: 128
+  n_layers: 4
+  n_heads: 4
+  n_kv_heads: 2
+  vocab_size: 4096
+  multiple_of: 32
+  norm_eps: 1.0e-05
+  max_seq_len: 256
+  dropout: 0.0
+  attention_variant: mha
+  rope_base: 10000
+  num_experts: 0
+  use_activation_checkpointing: true
+training:
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  max_epochs: 2
+  weight_decay: 0.01
+  clip_grad_norm: 1.0
+  loss_spike_threshold: 10.0
+  use_activation_checkpointing: true
+  learning_rate: 0.0005
+  warmup_ratio: 0.1
+  min_lr_ratio: 0.1
+logging:
+  log_interval: 5
+checkpointing:
+  save_interval: 200
+  resume_from: none

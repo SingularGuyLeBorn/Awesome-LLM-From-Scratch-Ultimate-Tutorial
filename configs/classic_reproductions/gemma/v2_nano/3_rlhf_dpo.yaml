@@ -1,0 +1,38 @@
+run_name: dpo-gemma-v2_nano-{timestamp}
+output_dir: ./runs/
+device: cpu
+console:
+  verbose: true
+data:
+  tokenizer_name: ./data_pipeline/processed_data/tinystories_project_vs4096.json
+  data_dir: ./data_pipeline/processed_data/
+model:
+  dim: 128
+  n_layers: 4
+  n_heads: 4
+  n_kv_heads: 1
+  vocab_size: 4096
+  multiple_of: 32
+  norm_eps: 1.0e-06
+  max_seq_len: 256
+  dropout: 0.0
+  attention_variant: mha
+  rope_base: 10000
+  num_experts: 0
+  use_activation_checkpointing: true
+offline:
+  algorithm: dpo
+  sft_model_checkpoint: will_be_overridden
+  beta: 0.1
+  label_smoothing: 0.0
+training:
+  batch_size: 1
+  gradient_accumulation_steps: 4
+  max_epochs: 1
+  weight_decay: 0.0
+  clip_grad_norm: 1.0
+  loss_spike_threshold: 10.0
+  use_activation_checkpointing: true
+  learning_rate: 5.0e-07
+logging:
+  log_interval: 1

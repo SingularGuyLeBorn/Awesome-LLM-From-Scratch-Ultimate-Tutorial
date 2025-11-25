@@ -1,0 +1,49 @@
+run_name: sft-lora-gemma-v2_nano-{timestamp}
+output_dir: ./runs/
+device: cpu
+console:
+  verbose: true
+data:
+  tokenizer_name: ./data_pipeline/processed_data/tinystories_project_vs4096.json
+  sft_data_path: ./data_pipeline/processed_data/sft_data.bin
+model:
+  dim: 128
+  n_layers: 4
+  n_heads: 4
+  n_kv_heads: 1
+  vocab_size: 4096
+  multiple_of: 32
+  norm_eps: 1.0e-06
+  max_seq_len: 256
+  dropout: 0.0
+  attention_variant: mha
+  rope_base: 10000
+  num_experts: 0
+  use_activation_checkpointing: true
+sft:
+  base_model_checkpoint: will_be_overridden_by_fast_dev_run
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+  - wq
+  - wk
+  - wv
+  - wo
+  - w_gate
+  - w_up
+  - w_down
+training:
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  max_epochs: 1
+  weight_decay: 0.01
+  clip_grad_norm: 1.0
+  loss_spike_threshold: 10.0
+  use_activation_checkpointing: true
+  learning_rate: 0.0002
+logging:
+  log_interval: 1
+checkpointing:
+  save_interval: 100

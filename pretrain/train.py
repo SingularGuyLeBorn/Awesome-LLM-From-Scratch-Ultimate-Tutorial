@@ -1,17 +1,34 @@
 # FILE: pretrain/train.py
 # -*- coding: utf-8 -*-
 """
-【v4.0 - 鲁棒性修复版】统一预训练/继续预训练脚本 (DDP enabled)
-- [核心修复] 使用 getattr 为所有非必须的配置参数提供默认值，防止因 YAML 缺少字段导致的 AttributeError。
-- 兼容精简版配置 (如 DeepSeek Nano) 和完整版配置。
+【v4.3 - 鲁棒性巅峰版】统一预训练/继续预训练脚本 (DDP + Compile + Auto-Fallback)
+- [自举] Windows UTF-8 编码自动修复。
+- [预检] 自动检测 C++ 编译器。如果没有安装 VS Build Tools，自动关闭编译以免崩溃。
+- [兼容] MoE 架构自动适配 DDP 参数。
 """
+import os
+import sys
+import subprocess
+import shutil
+
+# --- [Windows 兼容性补丁: 必须在任何逻辑执行前运行] ---
+if os.name == 'nt' and os.environ.get('PYTHONUTF8') != '1':
+    print("🔄 [系统自举] Windows 环境检测: 正在设置 PYTHONUTF8=1 并重启训练进程...")
+    env = os.environ.copy()
+    env['PYTHONUTF8'] = '1'
+    try:
+        ret = subprocess.call([sys.executable] + sys.argv, env=env)
+        sys.exit(ret)
+    except Exception as e:
+        print(f"❌ 自举失败: {e}")
+        sys.exit(1)
+# -----------------------------------------------------
+
 import torch
 import argparse
 from pathlib import Path
 import time
-import sys
 import shutil
-import os
 
 # --- 路径修复 ---
 project_root = str(Path(__file__).parent.parent)
@@ -34,10 +51,29 @@ except ImportError:
     GradScaler = None
 
 
+def check_cxx_compiler() -> bool:
+    """
+    检查系统中是否存在 C++ 编译器 (cl.exe for Windows, g++ for Linux/others)。
+    torch.compile(backend='inductor') 强依赖于 C++ 编译器。
+    """
+    if os.name == 'nt':
+        # Windows 需要 Visual Studio Build Tools (cl.exe)
+        # 或者 MinGW (g++)，但 inductor 对 MSVC 支持最好
+        if shutil.which('cl') is not None:
+            return True
+        if shutil.which('g++') is not None:
+            return True
+        return False
+    else:
+        # Linux/Mac 通常预装 g++ 或 clang
+        return shutil.which('c++') is not None or shutil.which('g++') is not None or shutil.which('clang++') is not None
+
+
 def main():
-    parser = argparse.ArgumentParser(description="[v4.0] 统一预训练/继续预训练脚本 (DDP enabled)")
+    parser = argparse.ArgumentParser(description="[v4.3] 统一预训练脚本")
     parser.add_argument("--config_path", type=str, required=True, help="指向配置YAML文件的路径")
-    parser.add_argument("--fast_dev_run", action="store_true", help="启用快速开发运行模式，使用固定名称并清理旧目录")
+    parser.add_argument("--fast_dev_run", action="store_true", help="启用快速开发运行模式")
+    parser.add_argument("--compile", action="store_true", help="启用 torch.compile (PyTorch 2.0+) 加速")
     args = parser.parse_args()
 
     setup_ddp()
@@ -69,16 +105,49 @@ def main():
         print(f"所有输出将保存到: {output_dir}")
 
     # --- 1. 模型 ---
-    # 使用 getattr 提供默认值 False
     cfg.model.use_activation_checkpointing = getattr(cfg.training, 'use_activation_checkpointing', False)
     model = build_model(cfg.model).to(cfg.device)
 
+    # [性能优化] torch.compile 智能处理
+    if args.compile:
+        can_compile = True
+        # 1. 检查编译器环境
+        if not check_cxx_compiler():
+            if is_main_process():
+                print("\n⚠️  [警告] 未检测到 C++ 编译器 (cl.exe 或 g++)！")
+                print("   torch.compile 需要 C++ 环境才能工作。")
+                print("   -> Windows 用户请安装: 'Visual Studio Build Tools' (勾选 C++ 桌面开发)。")
+                print("   -> 正在自动降级回 Eager 模式 (无编译) 继续运行...\n")
+            can_compile = False
+
+        # 2. 执行编译
+        if can_compile:
+            if is_main_process():
+                print("🚀 正在编译模型 (torch.compile)... 首次迭代可能会变慢。")
+            try:
+                # Windows 下 inductor 偶尔会有路径问题，加个保护
+                model = torch.compile(model, backend="inductor")
+            except Exception as e:
+                if is_main_process():
+                    print(f"❌ 编译失败: {e}")
+                    print("   -> 回退到 Eager 模式运行。")
+
     if world_size > 1:
-        model = DDP(model, device_ids=None if cfg.device == 'cpu' else [int(os.environ["LOCAL_RANK"])])
-        print(f"Rank {get_rank()}: 模型已用 DDP 包装。")
+        has_moe = cfg.model.num_experts > 1
+        find_unused = has_moe
+
+        if is_main_process() and has_moe:
+            print("⚠️ 检测到 MoE 架构，已启用 DDP(find_unused_parameters=True)。")
+
+        model = DDP(
+            model,
+            device_ids=None if cfg.device == 'cpu' else [int(os.environ["LOCAL_RANK"])],
+            find_unused_parameters=find_unused
+        )
+        if is_main_process():
+            print(f"模型已用 DDP 包装 (Rank {get_rank()})。")
 
     # --- 2. 数据、优化器、调度器、混合精度 ---
-    # 使用 getattr 提供默认值 None
     train_limit = getattr(cfg.data, 'train_data_limit', None)
     val_limit = getattr(cfg.data, 'val_data_limit', None)
 
@@ -100,7 +169,7 @@ def main():
         print("\n--- 4. 初始化检查点管理器 (仅主进程) ---")
 
     ckpt_dir = output_dir / "checkpoints" if is_main_process() else None
-    ckpt_manager = CheckpointManager(ckpt_dir, model, optimizer, scheduler, scaler)
+    ckpt_manager = CheckpointManager(ckpt_dir, model_for_optimizer, optimizer, scheduler, scaler)
     start_epoch = 0
 
     load_ckpt_path = getattr(cfg.training, 'load_from_checkpoint', "none")
@@ -117,15 +186,16 @@ def main():
     # --- 4. 钩子与训练器 ---
     if is_main_process():
         print("--- 1.1. 为模型注册监控钩子 ---")
-        hooks = register_hooks(model.module if world_size > 1 else model)
-        print(f"✅ 已成功注册 {len(hooks)} 个钩子用于监控内部状态。")
-        eff_batch_size = cfg.training.batch_size * cfg.training.gradient_accumulation_steps * world_size
-        print(f"全局等效批次大小: {eff_batch_size}")
+        try:
+            # 注意：编译后的模型注册 hook 可能会受限，这里尽力而为
+            hooks = register_hooks(model_for_optimizer)
+            print(f"✅ 已成功注册 {len(hooks)} 个钩子用于监控内部状态。")
+        except Exception as e:
+            print(f"⚠️ 钩子注册失败 (可能受 torch.compile 影响): {e}")
+            hooks = None
     else:
         hooks = None
 
-    # [核心修复] 使用 getattr 获取高级训练参数，提供安全的默认值
-    # 这样即使 yaml 文件中没有写这些参数，脚本也能正常运行
     trainer = Trainer(
         model=model, train_loader=train_loader, val_loader=val_loader,
         optimizer=optimizer, scheduler=scheduler, device=cfg.device,
@@ -135,7 +205,6 @@ def main():
         log_interval=getattr(cfg.logging, 'log_interval', 10),
         save_interval=getattr(cfg.checkpointing, 'save_interval', 1000),
         scaler=scaler,
-        # 训练稳定性参数 (默认值与 Trainer __init__ 保持一致)
         clip_grad_norm=getattr(cfg.training, 'clip_grad_norm', 1.0),
         loss_spike_threshold=getattr(cfg.training, 'loss_spike_threshold', 5.0),
         max_consecutive_spikes=getattr(cfg.training, 'max_consecutive_spikes', 5),

@@ -1,8 +1,8 @@
 # FILE: models/transformer.py
 """
-【v3.4 - KVCache 适配版】
-- Transformer.__init__ 现在根据 attention_variant 实例化正确的 KVCache (Standard vs Latent)。
-- KVCache 实例现在作为模型的一部分，而不是在 generate 函数中临时创建。
+【v3.7 - 量化兼容版】
+- [修复] 在 forward 中增加对量化层的防御性检查。
+- 当 lm_head 被动态量化后，不再尝试访问 .weight.dtype，避免 AttributeError。
 """
 import sys
 import os
@@ -25,12 +25,10 @@ from models.blocks.feedforward.feedforward import FeedForward
 from models.blocks.feedforward.moe import MoELayer
 from models.blocks.normalization.normalization import RMSNorm
 from models.blocks.positional_encoding.positional_encoding import RoPE, RoPEConfig
-# [核心修改] 导入所有 KVCache 类型
 from inference.engine.kv_cache import KVCacheBase, StandardKVCache, LatentKVCache
 
 
 class TransformerBlock(nn.Module):
-    # ... (代码不变)
     def __init__(self, args: ModelArgs, layer_id: int):
         super().__init__()
         self.attention = Attention(args)
@@ -45,7 +43,9 @@ class TransformerBlock(nn.Module):
                 hidden_dim=args.ffn_hidden_dim,
                 num_experts=args.num_experts,
                 num_experts_per_tok=args.num_experts_per_tok,
-                multiple_of=args.multiple_of
+                multiple_of=args.multiple_of,
+                num_shared_experts=args.num_shared_experts,
+                use_aux_free_lb=args.use_aux_free_lb
             )
         else:
             self.feed_forward = FeedForward(
@@ -102,11 +102,11 @@ class Transformer(nn.Module):
         )
         self.rope = RoPE(rope_config)
 
+        # Weight Tying
         self.tok_embeddings.weight = self.lm_head.weight
 
         self.apply(self._init_weights)
 
-        # 日志
         if args.use_activation_checkpointing: logging.info("Gradient Checkpointing: ENABLED")
         if args.num_experts > 1: logging.info(
             f"MoE Architecture: ENABLED ({args.num_experts} experts, top-{args.num_experts_per_tok})")
@@ -145,10 +145,19 @@ class Transformer(nn.Module):
         if return_hidden_states:
             return h
 
+        # [核心修复 v3.7] 智能类型匹配
+        # 1. 检查 lm_head 是否为标准 nn.Linear (有 weight 属性且是 Tensor)
+        # 2. 如果是标准层，则将输入 h 转换为权重的 dtype (解决 bf16/fp32 冲突)
+        # 3. 如果是动态量化层 (QuantizedLinear)，它没有标准的 .weight tensor，且通常期望 float 输入，
+        #    此时直接传入 h 即可 (前提是 h 也是 float，这在 inference/chat.py 的 quantize 分支中由 model.to('cpu') 保证)
+
+        if hasattr(self.lm_head, 'weight') and isinstance(self.lm_head.weight, torch.Tensor):
+            h = h.to(self.lm_head.weight.dtype)
+
         logits = self.lm_head(h)
+
         return logits
 
-    # [新增] 辅助函数，用于在推理前创建正确的 KVCache
     def create_kv_cache(self, max_batch_size: int, device: torch.device, dtype: torch.dtype) -> KVCacheBase:
         if self.args.attention_variant == "mla":
             return LatentKVCache(

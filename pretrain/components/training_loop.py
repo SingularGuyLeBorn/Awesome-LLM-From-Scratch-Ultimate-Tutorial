@@ -1,11 +1,7 @@
 # FILE: pretrain/components/training_loop.py
 """
-[v4.3 - Full Feature Restoration]
-- 恢复动态梯度裁剪 (Dynamic Gradient Clipping) 逻辑。
-- 包含 Loss Spike 检测。
-- 包含 MoE Aux-free Bias 动态更新。
-- 包含 Muon 优化器指标监控。
-- 包含 DDP 兼容性处理。
+[v4.4 - Best Checkpoint Assurance]
+- 在训练结束时调用 ensure_best_exists，确保 pipeline 下游有 checkpoint 可用。
 """
 import torch
 import torch.nn.functional as F
@@ -321,6 +317,8 @@ class Trainer:
                 self.ckpt_manager.save(epoch, eval_metrics['loss'], is_best)
 
         if is_main_process():
+            # [核心新增] 确保 best 检查点存在
+            self.ckpt_manager.ensure_best_exists()
             self.logger.finish()
 
 # END OF FILE: pretrain/components/training_loop.py

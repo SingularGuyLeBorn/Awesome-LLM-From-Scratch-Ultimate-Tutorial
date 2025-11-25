@@ -1,8 +1,8 @@
 # FILE: align/rm_train.py
 # -*- coding: utf-8 -*-
 """
-[v1.6 - 语义净化] 奖励模型 (Reward Model, RM) 训练主脚本。
-- 更新脚本以使用新的配置字段名 `sft_model_checkpoint`。
+[v1.7 - Best Checkpoint Assurance] 奖励模型 (RM) 训练主脚本。
+- [新增] 训练结束时确保 ckpt_best.pth 存在。
 """
 import torch
 import torch.nn.functional as F
@@ -29,7 +29,7 @@ def rm_loss(chosen_rewards: torch.Tensor, rejected_rewards: torch.Tensor) -> tor
 
 
 def main():
-    parser = argparse.ArgumentParser(description="[v1.6] 奖励模型 (RM) 训练脚本")
+    parser = argparse.ArgumentParser(description="[v1.7] 奖励模型 (RM) 训练脚本")
     parser.add_argument("--config_path", type=str, required=True, help="指向RM配置YAML文件的路径")
     parser.add_argument("--fast_dev_run", action="store_true", help="启用快速开发运行模式，使用固定名称并清理旧目录")
     args = parser.parse_args()
@@ -134,6 +134,8 @@ def main():
 
         ckpt_manager.save(epoch, 1 - epoch_accuracy, is_best)
 
+    # [核心修改] 确保 best 存在
+    ckpt_manager.ensure_best_exists()
     logger.finish()
     print("\n--- 奖励模型训练完成 ---")
 

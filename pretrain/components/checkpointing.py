@@ -1,15 +1,16 @@
 # FILE: pretrain/components/checkpointing.py
 """
-【v2.3 - DDP 支持】实现检查点管理。
+【v2.4 - 兜底机制版】实现检查点管理。
+- [新增] ensure_best_exists: 训练结束时若无 best，强制复制 latest 为 best。
 - save 方法现在只在主进程执行。
 """
 import torch
 import torch.nn as nn
 from pathlib import Path
 import logging
+import shutil  # [新增] 用于文件复制
 from typing import Optional
 
-# [核心新增]
 from utils.ddp_utils import is_main_process
 
 try:
@@ -32,7 +33,7 @@ class CheckpointManager:
             print(f"✅ 检查点管理器已初始化。检查点将保存到: '{self.checkpoint_dir}'")
 
     def save(self, epoch: int, val_loss: float, is_best: bool = False):
-        # [核心修改] 只有主进程才执行保存操作
+        # 只有主进程才执行保存操作
         if not is_main_process() or not self.checkpoint_dir:
             return
 
@@ -61,6 +62,35 @@ class CheckpointManager:
             best_ckpt_path = self.checkpoint_dir / "ckpt_best.pth"
             torch.save(state, best_ckpt_path)
             logging.info(f"Saved best checkpoint to {best_ckpt_path} (New best Val Loss: {val_loss:.4f})")
+
+    def ensure_best_exists(self):
+        """
+        [新增] 训练结束时的兜底逻辑。
+        如果训练过程中没有产生比初始值更好的结果（比如 fast_dev_run 只跑了几步），
+        或者指标没有提升，导致没有生成 ckpt_best.pth，
+        这里会强制将 ckpt_latest.pth 复制一份为 ckpt_best.pth。
+        这样保证下游任务总能找到 'ckpt_best.pth' 进行加载。
+        """
+        if not is_main_process() or not self.checkpoint_dir:
+            return
+
+        best_path = self.checkpoint_dir / "ckpt_best.pth"
+        latest_path = self.checkpoint_dir / "ckpt_latest.pth"
+
+        if not best_path.exists():
+            if latest_path.exists():
+                print(f"⚠️ 警告: 训练结束时未发现最佳检查点 (可能是指标未提升)。")
+                print(f"   -> 正在将 'ckpt_latest.pth' 强制复制为 'ckpt_best.pth' 以保证流程连贯性。")
+                try:
+                    shutil.copy(latest_path, best_path)
+                    print(f"   ✅ 复制成功: {best_path}")
+                except Exception as e:
+                    print(f"   ❌ 复制失败: {e}")
+            else:
+                print(f"⚠️ 警告: 未找到任何检查点 (latest 也缺失)，无法生成 best。")
+        else:
+            # 如果 best 已经存在，不做任何事
+            pass
 
     def load(self, resume_from: str = "latest", load_only_model: bool = False) -> int:
         # 在DDP中，所有进程都需要加载模型权重，所以这个函数不需要 `is_main_process` 守护

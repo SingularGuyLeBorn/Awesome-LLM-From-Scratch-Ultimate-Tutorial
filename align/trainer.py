@@ -1,9 +1,8 @@
 # FILE: align/trainer.py
 # -*- coding: utf-8 -*-
 """
-[v2.9 - PPO 算法正确性终极修复版] 统一对齐训练器
-- 核心修复: 在 `_update_phase` 中，对 policy_loss, value_loss, kl, entropy 的计算
-  全部应用了掩码 (mask)，确保只在有效 token 上进行计算，修复了 "silent bug"。
+[v3.0 - Best Checkpoint Assurance] 统一对齐训练器
+- [新增] 在训练结束时调用 ensure_best_exists()。
 """
 import torch
 import torch.nn.functional as F
@@ -75,6 +74,10 @@ class AlignmentTrainer:
                 self._train_offline_epoch(epoch)
             else:
                 self._train_online_epoch(epoch)
+
+        # [核心修改] 确保 best checkpoint 存在
+        self.ckpt_manager.ensure_best_exists()
+
         self.logger.finish()
         print(f"\n--- {self.algorithm.upper()} 训练完成 ---")
 
@@ -129,6 +132,9 @@ class AlignmentTrainer:
             if global_step % self.cfg.logging.log_interval == 0: self.logger.log(
                 {f'{self.algorithm}/loss': loss.item(), 'lr': self.scheduler.get_last_lr()[0]}, step=global_step)
             global_step += 1
+
+        # Save at end of epoch
+        self.ckpt_manager.save(epoch, loss.item())
 
     def _train_online_epoch(self, epoch):
         self._rollout_phase(epoch);
@@ -248,10 +254,10 @@ class AlignmentTrainer:
 
                     # [核心修复] 对 kl 和 entropy 进行掩码平均
                     kl_per_token = current_log_probs - ref_log_probs
-                    kl = (kl_per_token * mask).sum() / mask.sum()
+                    kl = (kl_per_token * mask).sum() / (mask.sum() + 1e-8)
 
                     entropy_per_token = -(probs * log_probs_dist).sum(dim=-1)
-                    entropy = (entropy_per_token * mask).sum() / mask.sum()
+                    entropy = (entropy_per_token * mask).sum() / (mask.sum() + 1e-8)
 
                     # [核心修复] 将 mask 传递给 ppo_loss
                     policy_loss = ppo_loss(
@@ -265,13 +271,13 @@ class AlignmentTrainer:
                     # [核心修复] 对 value_loss 进行掩码计算
                     value_loss_unmasked = (current_values - returns).pow(2)
                     value_loss_masked = value_loss_unmasked * mask
-                    value_loss = value_loss_masked.sum() / mask.sum()
+                    value_loss = value_loss_masked.sum() / (mask.sum() + 1e-8)
 
                     total_loss = (
-                        policy_loss
-                        + self.cfg.rl.kl_coeff * kl
-                        - self.cfg.rl.entropy_coef * entropy
-                        + self.cfg.rl.value_loss_coef * value_loss
+                            policy_loss
+                            + self.cfg.rl.kl_coeff * kl
+                            - self.cfg.rl.entropy_coef * entropy
+                            + self.cfg.rl.value_loss_coef * value_loss
                     )
 
                     self.policy_optimizer.zero_grad()

@@ -1,8 +1,8 @@
 # FILE: models/blocks/feedforward/moe.py
 """
-[v3.1 - Aux-free Update Logic]
-- 增加 last_expert_counts 缓冲区，用于记录专家负载。
-- 实现 update_bias 方法，根据负载偏差动态调整 expert_bias。
+[v3.2 - Stable Aux-free Logic]
+- 优化 Aux-free 负载均衡：增加 Bias 范围钳制 (Clamp) 以防数值震荡。
+- 保持 CPU 友好的循环实现，但增加 DDP 警告。
 """
 import torch
 import torch.nn as nn
@@ -58,6 +58,9 @@ class MoELayer(nn.Module):
         routing_weights = F.softmax(routing_weights, dim=-1, dtype=torch.float).to(x.dtype)
 
         # --- CPU Friendly Loop ---
+        # 注意：在 DDP 模式下，这种条件执行路径（Conditional Computation）可能会导致
+        # "unused parameters" 错误。
+        # 必须在 DDP 初始化时设置 `find_unused_parameters=True`。
         final_output = torch.zeros_like(x_flat)
         expert_mask = F.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 0, 1)
 
@@ -68,16 +71,23 @@ class MoELayer(nn.Module):
             # Sum over tokens and topk -> (NumExperts)
             # 使用 detach 避免影响梯度图
             current_counts = expert_mask.sum(dim=(1, 2)).detach().float()
-            # 简单的移动平均，或者直接覆盖（由 Trainer 决定如何使用）
+            # 简单的覆盖更新，由 Trainer 定期调用 update_bias 处理
             self.last_expert_counts = current_counts
 
         for expert_idx in range(self.num_experts):
             idx_in_topk = torch.where(expert_mask[expert_idx] > 0)
+
+            # 如果没有任何 token 选择这个专家，直接跳过计算
+            # 这是 CPU 推理加速的关键
             if idx_in_topk[0].numel() == 0:
                 continue
 
             token_indices = idx_in_topk[0]
+
+            # 只计算被选中的 token
             expert_output = self.experts[expert_idx](x_flat[token_indices])
+
+            # 加权累加
             weights = routing_weights[token_indices, idx_in_topk[1]].unsqueeze(-1)
             final_output.index_add_(0, token_indices, expert_output * weights)
 
@@ -90,28 +100,29 @@ class MoELayer(nn.Module):
         """
         [DeepSeek-V3] Aux-free Load Balancing 更新逻辑。
 
-        逻辑：
-        如果一个专家被选中的次数 (last_expert_counts) 超过了平均值，说明它"过热"。
-        我们需要降低它的 Bias，让它在下一次更难被选中。
-        反之，如果专家"过冷"，增加 Bias。
-
-        公式： bias -= lr * sign(count - mean_count)
+        [改进]: 增加 Clamp 防止 bias 无限制增长导致的“死专家”问题。
         """
         if not self.use_aux_free_lb:
             return
 
         counts = self.last_expert_counts
-        target = counts.mean()  # 理想情况下是均匀分布
+        # 加上 1.0 避免全 0 的情况
+        mean_count = counts.mean() + 1e-6
 
-        # 计算偏差
-        error = counts - target
+        # 如果某个专家的负载远超平均值，bias 应该降低
+        # 如果某个专家没人选，bias 应该升高
+        # sign(count - mean) > 0 => count > mean => bias decreases
 
-        # 更新 bias (In-place)
-        # 注意：这是一个纯数值操作，不涉及 Autograd
+        error = counts - mean_count
         update_step = lr * torch.sign(error)
+
         self.expert_bias.data -= update_step
 
-        # 归零统计量 (可选，取决于是否累计)
+        # [核心修复] 钳制 bias 范围，防止极端值
+        # 限制在 [-10, 10] 之间，这对于 Logits 来说已经足够大了
+        self.expert_bias.data.clamp_(min=-10.0, max=10.0)
+
+        # 归零统计量
         self.last_expert_counts.zero_()
 
 # END OF FILE: models/blocks/feedforward/moe.py

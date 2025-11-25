@@ -1,8 +1,9 @@
 # FILE: finetune/peft/qlora/sft_qlora_train.py
 # -*- coding: utf-8 -*-
 """
-[QLoRA Training] 专用的 QLoRA 训练脚本。
-更新: 集成自动层名探测，完美支持 MoE 和 MLA。
+[v1.9 - Config Fix] 专用的 QLoRA 训练脚本。
+- [修复] 从 cfg.checkpointing 读取 save_interval，而不是 cfg.training。
+- [增强] 使用 getattr 提供默认值，防止 AttributeError。
 """
 import torch
 import argparse
@@ -22,7 +23,6 @@ from finetune.sft_data_loader import get_sft_loaders
 from pretrain.components.checkpointing import CheckpointManager
 from pretrain.components.training_loop import Trainer
 from finetune.peft.qlora.qlora import replace_linear_with_qlora, prepare_model_for_qlora_training
-# [新增导入]
 from utils.model_utils import find_all_linear_names
 
 try:
@@ -78,15 +78,9 @@ def main():
     # --- 2. QLoRA 转换 (Quantize + Adapt) ---
     print("\n--- 2. Applying QLoRA ---")
 
-    # [核心逻辑] 自动检测 Target Modules
-    # 如果 YAML 里没写，或者写了 "auto"，或者我们强制想覆盖
-    # 这里我们采取策略：如果 YAML 里有，用 YAML 的；否则自动检测
-    # 但为了方便 MoE/MLA 用户，我们建议打印出检测到的 targets
-
     auto_targets = find_all_linear_names(model)
     print(f"🔍 Auto-detected linear modules: {auto_targets}")
 
-    # 优先使用配置文件中的，如果配置文件未指定，则使用自动检测的
     target_modules = getattr(cfg.qlora, 'target_modules', None)
     if target_modules is None or target_modules == "auto":
         print("   -> Using auto-detected modules for QLoRA.")
@@ -130,6 +124,10 @@ def main():
     ckpt_manager = CheckpointManager(output_dir / "checkpoints", model, optimizer, scheduler, scaler)
 
     # --- 6. 训练 ---
+    # [核心修复] 从 checkpointing 读取 save_interval，并提供默认值
+    save_interval = getattr(getattr(cfg, 'checkpointing', None), 'save_interval',
+                            getattr(cfg.training, 'save_interval', 1000))
+
     trainer = Trainer(
         model=model,
         train_loader=train_loader,
@@ -141,10 +139,10 @@ def main():
         ckpt_manager=ckpt_manager,
         hooks=None,
         gradient_accumulation_steps=cfg.training.gradient_accumulation_steps,
-        log_interval=cfg.logging.log_interval,
-        save_interval=cfg.training.save_interval,
+        log_interval=getattr(cfg.logging, 'log_interval', 10),
+        save_interval=save_interval,
         scaler=scaler,
-        clip_grad_norm=cfg.training.clip_grad_norm
+        clip_grad_norm=getattr(cfg.training, 'clip_grad_norm', 1.0)
     )
 
     print("\n🚀 Starting QLoRA Training...")

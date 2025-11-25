@@ -1,4 +1,4 @@
-# FILE: evaluation/benchmarks/run_gsm8k.py
+# FILE: evaluation/benchmarks/gsm8k.py
 # -*- coding: utf-8 -*-
 """
 [新增] GSM8K 数学推理能力评测脚本 (Lightweight版)。
@@ -155,4 +155,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-# END OF FILE: evaluation/benchmarks/run_gsm8k.py
+# END OF FILE: evaluation/benchmarks/gsm8k.py

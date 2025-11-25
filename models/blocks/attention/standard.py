@@ -1,8 +1,8 @@
 # FILE: models/blocks/attention/standard.py
 """
-【流派一：标准与潜变量注意力 v2.3 - 推理位置编码修复版】
-- 修复 MLA 推理优化中 RoPE 位置索引错误 (始终使用 pos 0 的 bug)。
-- 使用 apply_rotary_emb_paged 确保 decode 阶段使用正确的绝对位置。
+【流派一：标准与潜变量注意力 v2.6 - 终极量化适配】
+- [修复] 解决 Windows/特定 PyTorch 版本下 LinearPackedParams 缺少 .unpack() 方法的问题。
+- 引入 torch.ops.quantized.linear_unpack 作为强制解包的兜底方案。
 """
 import torch
 import torch.nn as nn
@@ -191,15 +191,17 @@ class MultiHeadLatentAttention(nn.Module):
         self.register_buffer("mask", mask)
 
     def forward(self, x, rope, layer_idx, kv_cache=None, start_pos=0, paged_attention_inputs=None, **kwargs):
-        if kv_cache is not None:
+        bs, seq_len, _ = x.shape
+
+        # 路由逻辑: 只有 Decode 阶段 (seq_len=1) 且有 Cache 才走极致优化路径
+        if kv_cache is not None and seq_len == 1:
             assert isinstance(kv_cache, LatentKVCache), "MLA requires a LatentKVCache for inference."
             return self._forward_inference_optimized(x, rope, layer_idx, kv_cache, start_pos)
 
         if paged_attention_inputs is not None:
             raise NotImplementedError("PagedAttention for MLA is not supported in this version.")
 
-        # Training Path
-        bs, seq_len, _ = x.shape
+        # --- Training / Prefill Path ---
 
         # 1. Query Generation
         if self.q_lora_rank > 0:
@@ -213,9 +215,9 @@ class MultiHeadLatentAttention(nn.Module):
 
         # 2. KV Generation
         kv_compressed = self.wkv_down(x)
-        kv_compressed = self.kv_norm(kv_compressed)
+        kv_compressed = self.kv_norm(kv_compressed)  # Latent KV: (bs, seq_len, kv_lora_rank)
 
-        # Decompress KV
+        # Decompress KV (for Attention computation)
         kv_up = self.wkv_up(kv_compressed)
         kv_up = kv_up.view(bs, seq_len, self.n_heads, self.nope_head_dim + self.v_head_dim)
         k_nope, v = torch.split(kv_up, [self.nope_head_dim, self.v_head_dim], dim=-1)
@@ -223,14 +225,18 @@ class MultiHeadLatentAttention(nn.Module):
         # k_rope_shared: (B, L, D) -> (B, L, 1, D)
         k_rope_shared = self.wk_rope(x).view(bs, seq_len, 1, self.rope_head_dim)
 
-        # 3. Apply RoPE (Need Transpose to B, H, L, D)
+        # Prefill 阶段更新 Cache
+        if kv_cache is not None:
+            k_rope_for_cache = k_rope_shared.squeeze(2)
+            kv_cache.update(layer_idx, start_pos, kv_compressed, k_rope_for_cache)
+
+        # 3. Apply RoPE
         q_pe = q_pe.transpose(1, 2)  # (B, H, L, D)
         k_rope_shared = k_rope_shared.transpose(1, 2)  # (B, 1, L, D)
 
         q_pe = rope.apply_rotary_emb(q_pe)
         k_rope_shared = rope.apply_rotary_emb(k_rope_shared)
 
-        # Transpose back: (B, L, H, D)
         q_pe = q_pe.transpose(1, 2)
         k_rope_shared = k_rope_shared.transpose(1, 2)
 
@@ -239,15 +245,16 @@ class MultiHeadLatentAttention(nn.Module):
         q = torch.cat([q_nope, q_pe], dim=-1)
         k = torch.cat([k_nope, k_rope], dim=-1)
 
-        # 5. Attention (B, H, L, D)
+        # 5. Attention
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
-        v = v.transpose(1, 2)  # Transpose V
+        v = v.transpose(1, 2)
 
         scores = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.nope_head_dim + self.rope_head_dim)
 
         if seq_len > 1:
-            scores = scores + self.mask[:, :, :seq_len, :seq_len]
+            local_mask = self.mask[:, :, :seq_len, :seq_len]
+            scores = scores + local_mask
 
         probs = F.softmax(scores.float(), dim=-1).type_as(q)
         output = torch.matmul(probs, v)
@@ -273,70 +280,66 @@ class MultiHeadLatentAttention(nn.Module):
         kv_compressed = self.kv_norm(self.wkv_down(x))  # (bs, 1, kv_lora_rank)
 
         # RoPE Key (Current Token, Shared)
-        # (B, L, D)
         k_rope_shared = self.wk_rope(x).view(bs, seq_len, self.rope_head_dim)
 
-        # --- 2. 应用 RoPE (Fix: 使用 apply_rotary_emb_paged 并传入绝对位置) ---
-
-        # 构造绝对位置索引
-        # positions: (bs * seq_len) -> [start_pos, start_pos+1, ...]
+        # --- 2. 应用 RoPE ---
         positions = torch.arange(start_pos, start_pos + seq_len, device=x.device, dtype=torch.long)
         positions = positions.unsqueeze(0).expand(bs, -1).flatten()
 
-        # Apply RoPE to Query
-        # q_pe: (B, L, H, D) -> View as (Tokens, H, D)
         q_pe_flat = q_pe.view(bs * seq_len, self.n_heads, self.rope_head_dim)
         q_pe_out = rope.apply_rotary_emb_paged(q_pe_flat, positions)
-        # Reshape back to (B, H, L, D) for Attention (Transpose required)
         q_pe = q_pe_out.view(bs, seq_len, self.n_heads, self.rope_head_dim).transpose(1, 2)
 
-        # Apply RoPE to Shared Key
-        # k_rope_shared: (B, L, D) -> View as (Tokens, 1, D)
         k_rope_flat = k_rope_shared.view(bs * seq_len, 1, self.rope_head_dim)
         k_rope_out = rope.apply_rotary_emb_paged(k_rope_flat, positions)
-        # Reshape back to (B, L, D)
         k_rope_shared = k_rope_out.view(bs, seq_len, self.rope_head_dim)
 
-        # --- 3. 更新缓存 (存的是压缩状态!) ---
-        # k_rope_shared is (bs, seq_len, rope_head_dim) matching cache expectation
+        # --- 3. 更新缓存 ---
         full_c_kv, full_k_rope = kv_cache.update(layer_idx, start_pos, kv_compressed, k_rope_shared)
 
         # --- 4. 计算 Attention Score (优化核心) ---
 
         # A. 计算 S_pe
-        # q_pe: (bs, n_heads, 1, rope_dim)
-        # k_rope_hist: (bs, full_len, rope_dim) -> broadcast -> (bs, 1, full_len, rope_dim)
         k_rope_hist_heads = full_k_rope.unsqueeze(1)  # (bs, 1, full_len, rope_dim)
-
         scores_pe = torch.matmul(q_pe, k_rope_hist_heads.transpose(-2, -1))
 
-        # B. 计算 S_nope
-        w_up_weight = self.wkv_up.weight
+        # B. 计算 S_nope (Matrix Absorption)
+        # [核心修复 v2.6]: 终极解包方案
+        w_up_weight = None
+        if hasattr(self.wkv_up, '_packed_params'):
+            # 优先尝试对象方法
+            if hasattr(self.wkv_up._packed_params, 'unpack'):
+                w_up_weight, _ = self.wkv_up._packed_params.unpack()
+            else:
+                # 兜底：使用全局算子 (针对 Windows/FBGEMM 后端)
+                try:
+                    w_up_weight, _ = torch.ops.quantized.linear_unpack(self.wkv_up._packed_params)
+                except Exception as e:
+                    # 如果连这也失败了，那确实是环境问题了
+                    raise RuntimeError(f"Failed to unpack quantized weights: {e}")
+        else:
+            # 标准 nn.Linear
+            w_up_weight = self.wkv_up.weight
+
         head_dim_total = self.nope_head_dim + self.v_head_dim
         w_up_reshaped = w_up_weight.view(self.n_heads, head_dim_total, self.kv_lora_rank)
 
         w_uk = w_up_reshaped[:, :self.nope_head_dim, :]
         w_uv = w_up_reshaped[:, self.nope_head_dim:, :]
 
-        # q_nope: (bs, L, H, D) -> Transpose -> (bs, H, L, D)
         q_nope_heads = q_nope.transpose(1, 2)
 
-        # q_absorbed
         q_absorbed = torch.einsum('bhtd,hdr->bhtr', q_nope_heads, w_uk)
 
-        # scores_nope
         scores_nope = torch.matmul(q_absorbed, full_c_kv.transpose(1, 2).unsqueeze(1))
 
         # Total Score
         scores = (scores_nope + scores_pe) / math.sqrt(self.nope_head_dim + self.rope_head_dim)
 
-        probs = F.softmax(scores.float(), dim=-1).type_as(x)  # (bs, n_heads, 1, full_len)
+        probs = F.softmax(scores.float(), dim=-1).type_as(x)
 
         # --- 5. 计算 Output ---
-        # Step 1: Latent Aggregate
         latent_output = torch.matmul(probs, full_c_kv.unsqueeze(1))
-
-        # Step 2: Decompress
         output = torch.einsum('bhtr,hvr->bhtv', latent_output, w_uv)
 
         # --- 6. Final Projection ---
